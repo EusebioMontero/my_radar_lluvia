@@ -1,21 +1,21 @@
-# Proxy de AEMET
+# Proxy de AEMET (composición nacional)
 
-Cloudflare Worker que guarda la API key de AEMET OpenData, añade CORS y cachea 5 minutos.
+Cloudflare Worker que descarga `https://www.aemet.es/es/api-eltiempo/radar/download/compo`
+(un archivo con 24 imágenes GeoTIFF, una cada 10 min), añade CORS y lo cachea 5 minutos.
+No usa API key.
 
 ## Despliegue
 
+Está conectado al repositorio con Cloudflare Workers Builds (Root directory: `worker`),
+así que cada push a `main` lo redespliega. Para desplegarlo a mano:
+
 ```
 cd worker
-npx wrangler login
-npx wrangler secret put AEMET_KEY     # pega aquí la key de AEMET
 npx wrangler deploy
 ```
 
-Wrangler imprime la URL del Worker (`https://radar-aemet-proxy.<tu-subdominio>.workers.dev`).
-Pégala en `AEMET_WORKER` al principio del script de `index.html`.
-
 Si publicas la página en otro dominio, añádelo a `ALLOWED_ORIGINS` en `wrangler.toml`.
 
-## Rutas
+## Ruta
 
-- `GET /radar/nacional` → imagen de la composición nacional de radares.
+- `GET /radar/compo` → el archivo tar (o tar.gz) con los GeoTIFF.
