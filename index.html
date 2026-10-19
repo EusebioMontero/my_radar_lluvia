@@ -193,15 +193,16 @@
   }
 
   let mode = 'rv';                    // 'rv' | 'compo' | 'aemet'
-  let cLayers = [], cTimes = [], cLoadedAt = 0;   // AEMET nacional
+  // Conjunto de imágenes activo (RainViewer o AEMET nacional): n imágenes, sus horas y cómo mostrar la i-ésima.
   const cur = () => (mode === 'compo'
-    ? { layers: cLayers, times: cTimes, fc: cTimes.map(() => false), op: 0.8, label: 'AEMET' }
-    : { layers, times, fc: isForecast, op: 0.75, label: 'observado' });
+    ? { n: compo.frames.length, times: compo.times, fc: [], label: 'AEMET', apply: i => compo.show(i) }
+    : { n: layers.length, times, fc: isForecast, label: 'observado',
+        apply: i => layers.forEach((l, k) => l.setOpacity(k === i ? 0.75 : 0)) });
 
   function show(i) {
     const S = cur();
     idx = i;
-    S.layers.forEach((l, k) => l.setOpacity(k === i ? S.op : 0));
+    S.apply(i);
     $('slider').value = i;
     $('clock').textContent = fmt.format(new Date(S.times[i] * 1000));
     const b = $('badge');
@@ -211,10 +212,10 @@
 
   function play() {
     if (timer) return pause();
-    if (idx >= cur().layers.length - 1) show(0);
+    if (idx >= cur().n - 1) show(0);
     $('play').textContent = '❚❚'; $('play').setAttribute('aria-label', 'Pausar');
     timer = setInterval(() => {
-      if (idx >= cur().layers.length - 1) return pause();
+      if (idx >= cur().n - 1) return pause();
       show(idx + 1);
     }, FRAME_MS);
   }
@@ -431,7 +432,7 @@
   function showRainviewer() {
     mode = 'rv';
     clearAemet();
-    cLayers.forEach(l => l.setOpacity(0));
+    compo.hide();
     $('play').hidden = $('slider').hidden = $('recalc').hidden = false;
     $('legend').hidden = false;
     $('keybtn').hidden = $('keyrow').hidden = $('calbtn').hidden = $('calrow').hidden = true;
@@ -444,7 +445,7 @@
     pause();
     mode = 'aemet';
     layers.forEach(l => l.setOpacity(0));
-    cLayers.forEach(l => l.setOpacity(0));
+    compo.hide();
     $('legend').hidden = true;
     $('play').hidden = $('slider').hidden = $('recalc').hidden = true;
     $('keybtn').hidden = false; $('calbtn').hidden = false;
@@ -547,23 +548,113 @@
     return { w, h, idxs, pal, west, north, east: west + w * sc[0], south: north - h * sc[1] };
   }
 
-  // Los índices 0 (sin eco) y 1 (fuera de cobertura) quedan transparentes; del 2 en adelante son ecos.
-  function frameRGBA(f) {
-    const d = new Uint8ClampedArray(f.w * f.h * 4);
-    for (let i = 0; i < f.idxs.length; i++) {
-      const v = f.idxs[i];
-      if (v < 2) continue;
-      d[i * 4] = f.pal[v * 3]; d[i * 4 + 1] = f.pal[v * 3 + 1]; d[i * 4 + 2] = f.pal[v * 3 + 2]; d[i * 4 + 3] = 255;
-    }
-    return d;
+  // Clase 0 = transparente (índice 0: dentro de cobertura sin eco; índice 1: fuera de cobertura);
+  // del 2 en adelante, ecos con el color de la paleta (empaquetado como RGBA para escribir en un canvas).
+  function toClasses(f) {
+    const cls = new Uint8Array(f.idxs.length);
+    for (let i = 0; i < cls.length; i++) { const v = f.idxs[i]; cls[i] = v < 2 ? 0 : v; }
+    const pal32 = new Uint32Array(256);
+    for (let v = 0; v < 256; v++) pal32[v] = (255 << 24 | f.pal[v * 3 + 2] << 16 | f.pal[v * 3 + 1] << 8 | f.pal[v * 3]) >>> 0;
+    return { cls, pal32 };
   }
   // </parse>
 
-  function frameCanvas(f) {
-    const c = document.createElement('canvas'); c.width = f.w; c.height = f.h;
-    c.getContext('2d').putImageData(new ImageData(frameRGBA(f), f.w, f.h), 0, 0);
-    return c;
-  }
+  // Capa propia: en vez de estirar una imagen de ~3 km por píxel, dibuja un canvas a la resolución de la pantalla.
+  // Para cada punto de la pantalla mira los 4 píxeles de radar vecinos y pinta la clase con más peso
+  // (interpolación suavizada), así los contornos salen redondeados a cualquier zoom y no hay bloques.
+  const compo = {
+    frames: [], times: [], geo: null, loadedAt: 0, layer: null,
+    clear() { this.hide(); this.frames = []; this.times = []; this.geo = null; },
+    show(i) {
+      if (!this.layer) this.layer = new CompoLayer();
+      if (!map.hasLayer(this.layer)) this.layer.addTo(map);
+      this.layer.setFrame(i);
+    },
+    hide() { if (this.layer && map.hasLayer(this.layer)) map.removeLayer(this.layer); }
+  };
+
+  const CompoLayer = L.Layer.extend({
+    initialize() { this._i = -1; },
+    onAdd(m) {
+      const c = this._c = L.DomUtil.create('canvas');
+      c.style.pointerEvents = 'none'; c.style.opacity = '0.8';
+      m.getPane('overlayPane').appendChild(c);
+      m.on('moveend resize', this._reset, this);
+      m.on('zoomstart', this._hide, this);
+      this._reset();
+    },
+    onRemove(m) {
+      m.off('moveend resize', this._reset, this);
+      m.off('zoomstart', this._hide, this);
+      L.DomUtil.remove(this._c); this._c = this._img = null;
+    },
+    setFrame(i) { this._i = i; this._draw(); },
+    _hide() { if (this._c) this._c.style.visibility = 'hidden'; },
+    // Coloca el canvas (algo más grande que la pantalla para poder arrastrar) y calcula, para cada columna y
+    // cada fila, a qué posición del radar corresponde (el eje X solo depende de la longitud y el Y de la latitud).
+    _reset() {
+      const m = this._map, c = this._c, g = compo.geo;
+      if (!c || !g) return;
+      const sz = m.getSize(), pad = 0.35;
+      const w = Math.round(sz.x * (1 + 2 * pad)), h = Math.round(sz.y * (1 + 2 * pad));
+      const ss = (window.devicePixelRatio || 1) >= 2 ? 2 : 1.5;   // sobremuestreo: el navegador lo reduce y suaviza el borde
+      const tl = m.containerPointToLayerPoint([-sz.x * pad, -sz.y * pad]).round();
+      L.DomUtil.setPosition(c, tl);
+      c.style.width = w + 'px'; c.style.height = h + 'px';
+      const W = c.width = Math.round(w * ss), H = c.height = Math.round(h * ss);
+      const dx = (g.east - g.west) / g.w, dy = (g.north - g.south) / g.h;
+      this._xi = new Int32Array(W); this._xf = new Float32Array(W);
+      this._yi = new Int32Array(H); this._yf = new Float32Array(H);
+      for (let x = 0; x < W; x++) {
+        const col = (m.layerPointToLatLng([tl.x + (x + 0.5) / ss, tl.y]).lng - g.west) / dx - 0.5;
+        const i = Math.floor(col); this._xi[x] = i; this._xf[x] = col - i;
+      }
+      for (let y = 0; y < H; y++) {
+        const row = (g.north - m.layerPointToLatLng([tl.x, tl.y + (y + 0.5) / ss]).lat) / dy - 0.5;
+        const j = Math.floor(row); this._yi[y] = j; this._yf[y] = row - j;
+      }
+      this._img = c.getContext('2d').createImageData(W, H);
+      this._draw();
+      c.style.visibility = '';
+    },
+    _draw() {
+      const c = this._c, F = compo.frames[this._i], g = compo.geo;
+      if (!c || !g || !this._img) return;
+      const img = this._img, W = img.width, H = img.height, out = new Uint32Array(img.data.buffer);
+      const xi = this._xi, xf = this._xf, yi = this._yi, yf = this._yf;
+      out.fill(0);
+      if (F) {
+        const cls = F.cls, pal = F.pal32, w = g.w, h = g.h;
+        for (let y = 0; y < H; y++) {
+          const j = yi[y];
+          if (j < -1 || j >= h) continue;
+          const fy = yf[y], sy = fy * fy * (3 - 2 * fy);
+          const r0 = j >= 0 ? j * w : -1, r1 = j + 1 < h ? (j + 1) * w : -1, row = y * W;
+          for (let x = 0; x < W; x++) {
+            const i = xi[x];
+            if (i < -1 || i >= w) continue;
+            const a = r0 >= 0 && i >= 0 ? cls[r0 + i] : 0, b = r0 >= 0 && i + 1 < w ? cls[r0 + i + 1] : 0;
+            const e = r1 >= 0 && i >= 0 ? cls[r1 + i] : 0, d = r1 >= 0 && i + 1 < w ? cls[r1 + i + 1] : 0;
+            let k;
+            if (a === b && b === e && e === d) k = a;
+            else {
+              const fx = xf[x], sx = fx * fx * (3 - 2 * fx);
+              const wa = (1 - sx) * (1 - sy), wb = sx * (1 - sy), wc = (1 - sx) * sy, wd = sx * sy;
+              k = a; let s = wa + (b === a ? wb : 0) + (e === a ? wc : 0) + (d === a ? wd : 0);
+              const sb = wb + (a === b ? wa : 0) + (e === b ? wc : 0) + (d === b ? wd : 0);
+              if (sb > s) { s = sb; k = b; }
+              const se = wc + (a === e ? wa : 0) + (b === e ? wb : 0) + (d === e ? wd : 0);
+              if (se > s) { s = se; k = e; }
+              const sd = wd + (a === d ? wa : 0) + (b === d ? wb : 0) + (e === d ? wc : 0);
+              if (sd > s) k = d;
+            }
+            if (k) out[row + x] = pal[k];
+          }
+        }
+      }
+      this._c.getContext('2d').putImageData(img, 0, 0);
+    }
+  });
 
   async function fetchCompo() {
     const errs = [];
@@ -587,17 +678,18 @@
     const files = untar(await gunzipIfNeeded(await fetchCompo()))
       .filter(f => /\.tiff?$/i.test(f.name)).sort((a, b) => a.name.localeCompare(b.name));
     if (!files.length) throw new Error('el archivo de AEMET no contiene imágenes');
-    cLayers.forEach(l => map.removeLayer(l)); cLayers = []; cTimes = [];
+    compo.clear();
     for (let i = 0; i < files.length; i++) {
       setStatus(`Preparando imágenes de AEMET… ${i + 1}/${files.length}`);
       await new Promise(r => setTimeout(r));   // deja respirar a la página
       const g = parseTiff(files[i].data);
+      if (!compo.geo) compo.geo = { w: g.w, h: g.h, west: g.west, north: g.north, east: g.east, south: g.south };
+      else if (g.w !== compo.geo.w || g.h !== compo.geo.h) throw new Error('las imágenes de AEMET no tienen el mismo tamaño');
       const m = /radw(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(files[i].name);
-      cTimes.push(m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5]) / 1000 : Date.now() / 1000 - (files.length - 1 - i) * 600);
-      const url = mercatorCanvas(frameCanvas(g), g).toDataURL('image/png');
-      cLayers.push(L.imageOverlay(url, L.latLngBounds([g.south, g.west], [g.north, g.east]), { opacity: 0, zIndex: 10, interactive: false }).addTo(map));
+      compo.times.push(m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5]) / 1000 : Date.now() / 1000 - (files.length - 1 - i) * 600);
+      compo.frames.push(toClasses(g));
     }
-    cLoadedAt = Date.now();
+    compo.loadedAt = Date.now();
   }
 
   async function showCompo() {
@@ -609,18 +701,19 @@
     $('recalc').hidden = $('keybtn').hidden = $('keyrow').hidden = $('calbtn').hidden = $('calrow').hidden = true;
     $('legend').hidden = true;
     try {
-      if (!cLayers.length || Date.now() - cLoadedAt > 10 * 60e3) {
+      if (!compo.frames.length || Date.now() - compo.loadedAt > 10 * 60e3) {
         $('clock').textContent = '--:--';
         setStatus('Descargando la composición nacional de AEMET…');
         await loadCompo();
       }
-      $('slider').max = cLayers.length - 1;
-      show(cLayers.length - 1);
+      if (mode !== 'compo') return;   // el usuario cambió de fuente mientras se descargaba
+      $('slider').max = compo.frames.length - 1;
+      show(compo.frames.length - 1);
       map.attributionControl.addAttribution(AEMET_CREDIT);
-      setStatus(`Composición nacional de AEMET: ${cLayers.length} imágenes, una cada 10 min. Pulsa ▶ para animarlas.`);
+      setStatus(`Composición nacional de AEMET: ${compo.frames.length} imágenes, una cada 10 min. Pulsa ▶ para animarlas.`);
     } catch (e) {
       console.warn('AEMET nacional:', e);
-      cLayers.forEach(l => map.removeLayer(l)); cLayers = []; cTimes = [];
+      compo.clear();
       $('fuente').value = 'rv';
       showRainviewer();
       setStatus(`AEMET nacional no disponible: ${e.message}. Se vuelve a RainViewer.`);
