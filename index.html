@@ -71,6 +71,7 @@
   .legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
   .legend i { display: inline-block; width: 22px; height: 8px; border-radius: 2px; }
   [hidden] { display: none !important; }
+  input[type="password"] { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
   .leaflet-control-attribution { font-size: 10.5px; }
   @media (prefers-color-scheme: dark) { .base { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.7); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -98,6 +99,7 @@
       <option value="38.7223,-9.1393">Lisboa</option>
     </select>
     <button id="recalc" type="button" title="Recalcular la previsión para la zona que se ve">Previsión aquí</button>
+    <button id="keybtn" type="button" hidden>Clave</button>
   </div>
 </div>
 
@@ -111,6 +113,10 @@
     <div class="row" style="justify-content:space-between">
       <span id="badge">cargando</span>
       <span class="legend"><i style="background:linear-gradient(90deg,#8ad1ff,#2f7ed8,#f5d000,#e8341c,#b10fb0)"></i>débil → intensa</span>
+    </div>
+    <div class="row" id="keyrow" hidden>
+      <input id="aemetkey" type="password" autocomplete="off" placeholder="API key de AEMET (solo en este navegador)" style="flex:1;min-width:0" aria-label="API key de AEMET">
+      <button id="savekey" type="button">Guardar</button>
     </div>
     <div id="status" role="status">Cargando radar…</div>
   </div>
@@ -132,6 +138,7 @@
 
   // AEMET: URL del Worker (ver worker/README.md). Vacío = opción desactivada.
   const AEMET_WORKER = 'https://radar-aemet-proxy.eusebio-montero.workers.dev';
+  const AEMET_DIRECT = 'https://opendata.aemet.es/opendata/api/red/radar/nacional';
   // Esquinas [[sur, oeste], [norte, este]] de la composición nacional. PROVISIONAL: hay que calibrarlas con la imagen real.
   const AEMET_BOUNDS = [[34.5, -11.5], [44.8, 5.5]];
 
@@ -294,11 +301,58 @@
   }
 
   // ---- Fuente AEMET ----
+  // Orden: 1) directo desde el navegador con la clave guardada aquí; 2) Worker (si está configurado).
   let aemetOverlay = null, aemetUrl = null;
+  const KEY_STORE = 'aemet_key';
+  const getKey = () => { try { return (localStorage.getItem(KEY_STORE) || '').trim(); } catch { return ''; } };
+  const saveKey = v => { try { localStorage.setItem(KEY_STORE, v); } catch {} };
+
+  async function aemetDirect(key) {
+    let r;
+    try { r = await fetch(`${AEMET_DIRECT}?api_key=${encodeURIComponent(key)}`); }
+    catch { throw new Error('el navegador no pudo conectar con AEMET (CORS o red)'); }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    if (j.estado !== 200 || !j.datos) throw new Error(`AEMET respondió ${j.estado}: ${j.descripcion || 'sin detalle'}`);
+    let img;
+    try { img = await fetch(j.datos); } catch { throw new Error('el navegador no pudo descargar la imagen (CORS o red)'); }
+    if (!img.ok) throw new Error(`imagen HTTP ${img.status}`);
+    return img.blob();
+  }
+
+  async function aemetWorker() {
+    const r = await fetch(`${AEMET_WORKER}/radar/nacional`);
+    if (!r.ok) {
+      let d = '';
+      try { const j = await r.json(); d = [j.error, j.descripcion, j.status || j.estado].filter(Boolean).join(' · '); } catch {}
+      throw new Error(`HTTP ${r.status}${d ? ': ' + d : ''}`);
+    }
+    return r.blob();
+  }
+
+  // Algunos servidores devuelven la imagen sin tipo MIME: se reconoce por su cabecera.
+  async function asImage(blob) {
+    if (blob.type.startsWith('image/')) return blob;
+    const h = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+    const sig = (h[0] === 0x47 && h[1] === 0x49 && h[2] === 0x46) ? 'image/gif'
+      : (h[0] === 0x89 && h[1] === 0x50) ? 'image/png'
+      : (h[0] === 0xff && h[1] === 0xd8) ? 'image/jpeg' : '';
+    if (!sig) throw new Error(`la respuesta no es una imagen (tipo: ${blob.type || 'desconocido'}, ${blob.size} bytes)`);
+    return new Blob([blob], { type: sig });
+  }
+
+  async function fetchAemet() {
+    const errs = [];
+    const key = getKey();
+    if (key) { try { return await asImage(await aemetDirect(key)); } catch (e) { errs.push('directo: ' + e.message); } }
+    if (AEMET_WORKER) { try { return await asImage(await aemetWorker()); } catch (e) { errs.push('Worker: ' + e.message); } }
+    throw new Error(errs.join(' | ') || 'falta la clave de AEMET');
+  }
 
   function showRainviewer() {
     if (aemetOverlay) { map.removeLayer(aemetOverlay); aemetOverlay = null; }
     $('play').hidden = $('slider').hidden = $('recalc').hidden = false;
+    $('keybtn').hidden = $('keyrow').hidden = true;
     if (layers.length) show(Math.min(idx, layers.length - 1));
     setStatus('RainViewer: pulsa ▶ para ver la animación.');
   }
@@ -307,18 +361,12 @@
     pause();
     layers.forEach(l => l.setOpacity(0));
     $('play').hidden = $('slider').hidden = $('recalc').hidden = true;
+    $('keybtn').hidden = false;
     const b = $('badge'); b.textContent = 'AEMET'; b.classList.remove('fc');
     $('clock').textContent = '--:--';
     setStatus('Descargando radar de AEMET…');
     try {
-      const r = await fetch(`${AEMET_WORKER}/radar/nacional`);
-      if (!r.ok) {
-        let d = '';
-        try { const j = await r.json(); d = [j.error, j.descripcion, j.status || j.estado].filter(Boolean).join(' · '); } catch {}
-        throw new Error(`el Worker respondió HTTP ${r.status}${d ? ': ' + d : ''}`);
-      }
-      const blob = await r.blob();
-      if (!blob.type.startsWith('image/')) throw new Error(`la respuesta no es una imagen (tipo: ${blob.type || 'desconocido'}, ${blob.size} bytes)`);
+      const blob = await fetchAemet();
       if (aemetUrl) URL.revokeObjectURL(aemetUrl);
       aemetUrl = URL.createObjectURL(blob);
       if (aemetOverlay) map.removeLayer(aemetOverlay);
@@ -330,8 +378,9 @@
       console.warn('AEMET:', e);
       $('fuente').value = 'rv';
       showRainviewer();
-      const msg = e instanceof TypeError ? 'no se pudo conectar con el Worker (red o CORS)' : e.message;
-      setStatus(`AEMET no disponible: ${msg}. Se vuelve a RainViewer.`);
+      $('keybtn').hidden = false;
+      if (!getKey()) $('keyrow').hidden = false;
+      setStatus(`AEMET no disponible: ${e.message}. Se vuelve a RainViewer.${getKey() ? '' : ' Guarda tu clave con el botón Clave.'}`);
     }
   }
 
@@ -357,10 +406,13 @@
     $('slider').max = layers.length - 1;
   }
 
-  if (!AEMET_WORKER) {
-    const o = $('fuente').querySelector('option[value="aemet"]');
-    o.disabled = true; o.textContent = 'AEMET (sin configurar)';
-  }
+  $('keybtn').addEventListener('click', () => { $('keyrow').hidden = !$('keyrow').hidden; });
+  $('savekey').addEventListener('click', () => {
+    const v = $('aemetkey').value.trim();
+    if (!v) return;
+    saveKey(v); $('aemetkey').value = ''; $('keyrow').hidden = true;
+    $('fuente').value = 'aemet'; showAemet();
+  });
   $('fuente').addEventListener('change', e => (e.target.value === 'aemet' ? showAemet() : showRainviewer()));
   $('play').addEventListener('click', play);
   $('slider').addEventListener('input', e => { pause(); show(+e.target.value); });
