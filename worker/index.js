@@ -5,6 +5,7 @@
 const API = 'https://opendata.aemet.es/opendata/api';
 const ROUTES = { '/radar/nacional': '/red/radar/nacional' };
 const CACHE_SECONDS = 300;
+const UA = 'Mozilla/5.0 (compatible; my_radar_lluvia-proxy/1.0; +https://github.com/EusebioMontero/my_radar_lluvia)';
 
 function corsHeaders(request, env) {
   const origin = request.headers.get('Origin') || '';
@@ -44,7 +45,9 @@ export default {
       let info = null, lastErr = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         if (attempt) await new Promise(r => setTimeout(r, 800));
-        const meta = await fetch(API + route, { headers: { api_key: env.AEMET_KEY, Accept: 'application/json' } });
+        const meta = await fetch(`${API}${route}?api_key=${encodeURIComponent(env.AEMET_KEY.trim())}`, {
+          headers: { api_key: env.AEMET_KEY.trim(), Accept: 'application/json', 'User-Agent': UA, 'Cache-Control': 'no-cache' }
+        });
         if (!meta.ok) { lastErr = { error: 'AEMET respondió con error', status: meta.status }; continue; }
         let j;
         try { j = await meta.json(); } catch { lastErr = { error: 'Respuesta de AEMET no válida' }; continue; }
@@ -52,7 +55,7 @@ export default {
         info = j; break;
       }
       if (!info) return json(502, { ...lastErr, intentos: 3 }, cors);
-      const img = await fetch(info.datos);
+      const img = await fetch(info.datos, { headers: { 'User-Agent': UA } });
       if (!img.ok) return json(502, { error: 'No se pudo descargar la imagen de AEMET', status: img.status }, cors);
 
       base = new Response(img.body, {
