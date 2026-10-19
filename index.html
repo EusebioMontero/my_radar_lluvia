@@ -323,7 +323,7 @@
   const getRadar = () => store.get('aemet_radar') || AEMET_DEFAULT_RADAR;
 
   // Calibración ajustable (se guarda en este navegador): desplazamiento E-O y N-S en km, tamaño en % y opacidad en %.
-  const CAL_DEFAULT = { dx: 15, dy: 0, s: 100, op: 75 };
+  const CAL_DEFAULT = { dx: 8, dy: -12, s: 100, op: 75 };   // valores calibrados a mano sobre la frontera con Portugal
   let cal = { ...CAL_DEFAULT };
   try { Object.assign(cal, JSON.parse(localStorage.getItem('aemet_cal') || '{}')); } catch {}
   let aemetNat = [1, 1];
@@ -333,17 +333,42 @@
     const lat = AEMET_CENTER[0] + cal.dy / KM_DEG;
     return [lat, AEMET_CENTER[1] + cal.dx / (KM_DEG * Math.cos(AEMET_CENTER[0] * Math.PI / 180))];
   }
-  // Supuesto: el disco ocupa todo el ancho de la imagen; el alto sobrante (cabecera y escala) queda por debajo.
-  function aemetBounds(w, h) {
-    const [lat, lon] = aemetCenter();
+  // El GIF mide 480x530 px: el disco de radar (240 km de radio) ocupa todo el ancho, así que 1 px ~ 1 km,
+  // y los ~50 px sobrantes son la cabecera y la escala de colores, que quedan por debajo del borde norte.
+  let aemetImg = null;
+  function aemetGeom() {
+    const [lat0, lon0] = aemetCenter();
     const R = AEMET_RADIUS_KM * cal.s / 100;
-    const dLon = R / (KM_DEG * Math.cos(lat * Math.PI / 180));
-    const extraKm = Math.max(0, h - w) * (2 * R / w);
-    return [[lat - (R + extraKm) / KM_DEG, lon - dLon], [lat + R / KM_DEG, lon + dLon]];
+    const [w, h] = aemetNat;
+    const halfLon = R / (KM_DEG * Math.cos(lat0 * Math.PI / 180));
+    const north = lat0 + R / KM_DEG;
+    const south = north - (h * (2 * R / w)) / KM_DEG;
+    return { north, south, west: lon0 - halfLon, east: lon0 + halfLon };
   }
+  // Leaflet estira la imagen en el plano Mercator; la de AEMET es lineal en kilómetros (latitud). Se remuestrean las filas.
+  function mercatorCanvas(img, g) {
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const merc = lat => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+    const yN = merc(g.north), yS = merc(g.south);
+    const outH = Math.max(2, Math.round(h * (yN - yS) / ((g.north - g.south) * Math.PI / 180)));
+    const c = document.createElement('canvas'); c.width = w; c.height = outH;
+    const ctx = c.getContext('2d'); ctx.imageSmoothingEnabled = false;
+    for (let j = 0; j < outH; j++) {
+      const lat = (2 * Math.atan(Math.exp(yN - (j + 0.5) / outH * (yN - yS))) - Math.PI / 2) * 180 / Math.PI;
+      const row = Math.min(h - 1, Math.max(0, Math.floor((g.north - lat) / (g.north - g.south) * h)));
+      ctx.drawImage(img, 0, row, w, 1, 0, j, w, 1);
+    }
+    return c;
+  }
+  const geomBounds = g => L.latLngBounds([g.south, g.west], [g.north, g.east]);
   function applyCal(save = true) {
     const R = AEMET_RADIUS_KM * cal.s / 100;
-    if (aemetOverlay) { aemetOverlay.setBounds(L.latLngBounds(aemetBounds(...aemetNat))); aemetOverlay.setOpacity(cal.op / 100); }
+    if (aemetOverlay && aemetImg) {
+      const g = aemetGeom();
+      aemetOverlay.setUrl(mercatorCanvas(aemetImg, g).toDataURL('image/png'));
+      aemetOverlay.setBounds(geomBounds(g));
+      aemetOverlay.setOpacity(cal.op / 100);
+    }
     if (aemetRing) { aemetRing.setLatLng(aemetCenter()); aemetRing.setRadius(R * 1000); }
     const sgn = v => (v > 0 ? '+' : '') + v;
     $('o-dx').textContent = sgn(cal.dx) + ' km'; $('o-dy').textContent = sgn(cal.dy) + ' km';
@@ -352,10 +377,10 @@
     $('cal-dx').value = cal.dx; $('cal-dy').value = cal.dy; $('cal-s').value = cal.s; $('cal-op').value = cal.op;
     if (save) { try { localStorage.setItem('aemet_cal', JSON.stringify(cal)); } catch {} }
   }
-  function imageSize(url) {
+  function loadImage(url) {
     return new Promise((res, rej) => {
       const im = new Image();
-      im.onload = () => res([im.naturalWidth, im.naturalHeight]);
+      im.onload = () => res(im);
       im.onerror = () => rej(new Error('el navegador no pudo leer la imagen de AEMET'));
       im.src = url;
     });
@@ -420,10 +445,11 @@
       if (aemetUrl) URL.revokeObjectURL(aemetUrl);
       aemetUrl = URL.createObjectURL(blob);
       clearAemet();
-      const [nw, nh] = await imageSize(aemetUrl);
+      aemetImg = await loadImage(aemetUrl);
+      const nw = aemetImg.naturalWidth, nh = aemetImg.naturalHeight;
       aemetNat = [nw, nh];
-      const bd = aemetBounds(nw, nh);
-      aemetOverlay = L.imageOverlay(aemetUrl, bd, { opacity: cal.op / 100, zIndex: 10, interactive: false }).addTo(map);
+      const g = aemetGeom(), bd = geomBounds(g);
+      aemetOverlay = L.imageOverlay(mercatorCanvas(aemetImg, g).toDataURL('image/png'), bd, { opacity: cal.op / 100, zIndex: 10, interactive: false }).addTo(map);
       aemetOverlay.on('error', () => setStatus(`El navegador no pudo leer la imagen de AEMET (tipo: ${blob.type}, ${blob.size} bytes).`));
       aemetRing = L.circle(aemetCenter(), { radius: AEMET_RADIUS_KM * cal.s / 100 * 1000, color: '#e8341c', weight: 1.5, dashArray: '6 6', fill: false, interactive: false }).addTo(map);
       map.fitBounds(bd);
