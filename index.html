@@ -116,6 +116,7 @@
     </div>
     <div class="row" id="keyrow" hidden>
       <input id="aemetkey" type="password" autocomplete="off" placeholder="API key de AEMET (solo en este navegador)" style="flex:1;min-width:0" aria-label="API key de AEMET">
+      <input id="radarcode" type="text" autocomplete="off" maxlength="6" size="4" aria-label="Código de radar" title="Código del radar regional (ca = Cáceres)" style="width:5ch;font:inherit;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:8px;padding:6px 8px">
       <button id="savekey" type="button">Guardar</button>
     </div>
     <div id="status" role="status">Cargando radar…</div>
@@ -136,11 +137,11 @@
   const STEP_S = 600;
   const FRAME_MS = 650;
 
-  // AEMET: URL del Worker (ver worker/README.md). Vacío = opción desactivada.
-  const AEMET_WORKER = 'https://radar-aemet-proxy.eusebio-montero.workers.dev';
-  const AEMET_DIRECT = 'https://opendata.aemet.es/opendata/api/red/radar/nacional';
-  // Esquinas [[sur, oeste], [norte, este]] de la composición nacional. PROVISIONAL: hay que calibrarlas con la imagen real.
-  const AEMET_BOUNDS = [[34.5, -11.5], [44.8, 5.5]];
+  // AEMET: radar regional, pedido directamente desde el navegador con tu clave (se guarda solo en localStorage).
+  const AEMET_API = 'https://opendata.aemet.es/opendata/api/red/radar/regional/';
+  const AEMET_DEFAULT_RADAR = 'ca';              // Cáceres
+  const AEMET_CENTER = [39.5, -6.4];             // PROVISIONAL: posición de la antena, hay que calibrarla
+  const AEMET_RADIUS_KM = 240;                   // PROVISIONAL: radio que cubre la imagen
 
   const $ = id => document.getElementById(id);
   const map = L.map('map', { zoomControl: false, maxZoom: 10, minZoom: 4 });
@@ -300,34 +301,32 @@
     }
   }
 
-  // ---- Fuente AEMET ----
-  // Orden: 1) directo desde el navegador con la clave guardada aquí; 2) Worker (si está configurado).
-  let aemetOverlay = null, aemetUrl = null;
-  const KEY_STORE = 'aemet_key';
-  const getKey = () => { try { return (localStorage.getItem(KEY_STORE) || '').trim(); } catch { return ''; } };
-  const saveKey = v => { try { localStorage.setItem(KEY_STORE, v); } catch {} };
+  // ---- Fuente AEMET (radar regional) ----
+  let aemetOverlay = null, aemetRing = null, aemetUrl = null;
+  const store = {
+    get: k => { try { return (localStorage.getItem(k) || '').trim(); } catch { return ''; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }
+  };
+  const getRadar = () => store.get('aemet_radar') || AEMET_DEFAULT_RADAR;
 
-  async function aemetDirect(key) {
+  function aemetBounds() {
+    const [lat, lon] = AEMET_CENTER;
+    const dLat = AEMET_RADIUS_KM / 111.19;
+    const dLon = AEMET_RADIUS_KM / (111.19 * Math.cos(lat * Math.PI / 180));
+    return [[lat - dLat, lon - dLon], [lat + dLat, lon + dLon]];
+  }
+
+  async function aemetFetch(key, radar) {
     let r;
-    try { r = await fetch(`${AEMET_DIRECT}?api_key=${encodeURIComponent(key)}`); }
+    try { r = await fetch(`${AEMET_API}${encodeURIComponent(radar)}?api_key=${encodeURIComponent(key)}`); }
     catch { throw new Error('el navegador no pudo conectar con AEMET (CORS o red)'); }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
-    if (j.estado !== 200 || !j.datos) throw new Error(`AEMET respondió ${j.estado}: ${j.descripcion || 'sin detalle'}`);
+    if (j.estado !== 200 || !j.datos) throw new Error(`AEMET respondió ${j.estado}: ${j.descripcion || 'sin detalle'} (radar "${radar}")`);
     let img;
     try { img = await fetch(j.datos); } catch { throw new Error('el navegador no pudo descargar la imagen (CORS o red)'); }
     if (!img.ok) throw new Error(`imagen HTTP ${img.status}`);
     return img.blob();
-  }
-
-  async function aemetWorker() {
-    const r = await fetch(`${AEMET_WORKER}/radar/nacional`);
-    if (!r.ok) {
-      let d = '';
-      try { const j = await r.json(); d = [j.error, j.descripcion, j.status || j.estado].filter(Boolean).join(' · '); } catch {}
-      throw new Error(`HTTP ${r.status}${d ? ': ' + d : ''}`);
-    }
-    return r.blob();
   }
 
   // Algunos servidores devuelven la imagen sin tipo MIME: se reconoce por su cabecera.
@@ -341,16 +340,13 @@
     return new Blob([blob], { type: sig });
   }
 
-  async function fetchAemet() {
-    const errs = [];
-    const key = getKey();
-    if (key) { try { return await asImage(await aemetDirect(key)); } catch (e) { errs.push('directo: ' + e.message); } }
-    if (AEMET_WORKER) { try { return await asImage(await aemetWorker()); } catch (e) { errs.push('Worker: ' + e.message); } }
-    throw new Error(errs.join(' | ') || 'falta la clave de AEMET');
+  function clearAemet() {
+    if (aemetOverlay) { map.removeLayer(aemetOverlay); aemetOverlay = null; }
+    if (aemetRing) { map.removeLayer(aemetRing); aemetRing = null; }
   }
 
   function showRainviewer() {
-    if (aemetOverlay) { map.removeLayer(aemetOverlay); aemetOverlay = null; }
+    clearAemet();
     $('play').hidden = $('slider').hidden = $('recalc').hidden = false;
     $('keybtn').hidden = $('keyrow').hidden = true;
     if (layers.length) show(Math.min(idx, layers.length - 1));
@@ -364,23 +360,33 @@
     $('keybtn').hidden = false;
     const b = $('badge'); b.textContent = 'AEMET'; b.classList.remove('fc');
     $('clock').textContent = '--:--';
-    setStatus('Descargando radar de AEMET…');
+    const key = store.get('aemet_key'), radar = getRadar();
+    $('radarcode').value = radar;
+    if (!key) {
+      $('fuente').value = 'rv'; showRainviewer();
+      $('keybtn').hidden = false; $('keyrow').hidden = false;
+      setStatus('Para usar AEMET guarda tu API key con el botón Clave. Se vuelve a RainViewer.');
+      return;
+    }
+    setStatus(`Descargando radar "${radar}" de AEMET…`);
     try {
-      const blob = await fetchAemet();
+      const blob = await asImage(await aemetFetch(key, radar));
       if (aemetUrl) URL.revokeObjectURL(aemetUrl);
       aemetUrl = URL.createObjectURL(blob);
-      if (aemetOverlay) map.removeLayer(aemetOverlay);
-      aemetOverlay = L.imageOverlay(aemetUrl, AEMET_BOUNDS, { opacity: 0.75, zIndex: 10, interactive: false }).addTo(map);
+      clearAemet();
+      const bd = aemetBounds();
+      aemetOverlay = L.imageOverlay(aemetUrl, bd, { opacity: 0.75, zIndex: 10, interactive: false }).addTo(map);
       aemetOverlay.on('error', () => setStatus(`El navegador no pudo leer la imagen de AEMET (tipo: ${blob.type}, ${blob.size} bytes).`));
+      aemetRing = L.circle(AEMET_CENTER, { radius: AEMET_RADIUS_KM * 1000, color: '#e8341c', weight: 1.5, dashArray: '6 6', fill: false, interactive: false }).addTo(map);
+      map.fitBounds(bd);
       $('clock').textContent = fmt.format(new Date());
-      setStatus('Composición nacional de AEMET: última imagen disponible, descargada a la hora indicada. Posición provisional, sin calibrar.');
+      setStatus(`Radar regional "${radar}" de AEMET (última imagen, descargada a la hora indicada). Posición provisional: el círculo punteado marca el alcance supuesto.`);
     } catch (e) {
       console.warn('AEMET:', e);
       $('fuente').value = 'rv';
       showRainviewer();
       $('keybtn').hidden = false;
-      if (!getKey()) $('keyrow').hidden = false;
-      setStatus(`AEMET no disponible: ${e.message}. Se vuelve a RainViewer.${getKey() ? '' : ' Guarda tu clave con el botón Clave.'}`);
+      setStatus(`AEMET no disponible: ${e.message}. Se vuelve a RainViewer.`);
     }
   }
 
@@ -406,11 +412,13 @@
     $('slider').max = layers.length - 1;
   }
 
-  $('keybtn').addEventListener('click', () => { $('keyrow').hidden = !$('keyrow').hidden; });
+  $('keybtn').addEventListener('click', () => { $('radarcode').value = getRadar(); $('keyrow').hidden = !$('keyrow').hidden; });
   $('savekey').addEventListener('click', () => {
-    const v = $('aemetkey').value.trim();
-    if (!v) return;
-    saveKey(v); $('aemetkey').value = ''; $('keyrow').hidden = true;
+    const v = $('aemetkey').value.trim(), rc = $('radarcode').value.trim().toLowerCase();
+    if (rc) store.set('aemet_radar', rc);
+    if (v) store.set('aemet_key', v);
+    if (!store.get('aemet_key')) return;
+    $('aemetkey').value = ''; $('keyrow').hidden = true;
     $('fuente').value = 'aemet'; showAemet();
   });
   $('fuente').addEventListener('change', e => (e.target.value === 'aemet' ? showAemet() : showRainviewer()));
