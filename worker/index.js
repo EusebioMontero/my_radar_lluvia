@@ -40,13 +40,18 @@ export default {
     let base = await cache.match(cacheKey);
 
     if (!base) {
-      const meta = await fetch(API + route, { headers: { api_key: env.AEMET_KEY, Accept: 'application/json' } });
-      if (!meta.ok) return json(502, { error: 'AEMET respondió con error', status: meta.status }, cors);
-      let info;
-      try { info = await meta.json(); } catch { return json(502, { error: 'Respuesta de AEMET no válida' }, cors); }
-      if (info.estado !== 200 || !info.datos) {
-        return json(502, { error: 'AEMET no devolvió datos', estado: info.estado, descripcion: info.descripcion }, cors);
+      // AEMET falla a veces de forma puntual: hasta 3 intentos si responde con error.
+      let info = null, lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await new Promise(r => setTimeout(r, 800));
+        const meta = await fetch(API + route, { headers: { api_key: env.AEMET_KEY, Accept: 'application/json' } });
+        if (!meta.ok) { lastErr = { error: 'AEMET respondió con error', status: meta.status }; continue; }
+        let j;
+        try { j = await meta.json(); } catch { lastErr = { error: 'Respuesta de AEMET no válida' }; continue; }
+        if (j.estado !== 200 || !j.datos) { lastErr = { error: 'AEMET no devolvió datos', estado: j.estado, descripcion: j.descripcion }; if (j.estado === 401) break; continue; }
+        info = j; break;
       }
+      if (!info) return json(502, { ...lastErr, intentos: 3 }, cors);
       const img = await fetch(info.datos);
       if (!img.ok) return json(502, { error: 'No se pudo descargar la imagen de AEMET', status: img.status }, cors);
 
