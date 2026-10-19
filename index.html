@@ -399,10 +399,22 @@
     });
   }
 
+  // La clave va en la cabecera api_key, así no queda en la URL, el historial ni los registros. Si el navegador
+  // bloquea esa cabecera (CORS) o AEMET la rechaza, se repite la petición con la clave como parámetro.
+  async function aemetCall(radar, key) {
+    const base = `${AEMET_API}${encodeURIComponent(radar)}/`;
+    try {
+      const r = await fetch(base, { headers: { api_key: key } });
+      if (r.status !== 401 && r.status !== 403) return { r, via: 'cabecera' };
+    } catch { /* preflight bloqueado: se prueba con el parámetro */ }
+    return { r: await fetch(`${base}?api_key=${encodeURIComponent(key)}`), via: 'parámetro' };
+  }
+
   async function aemetFetch(key, radar) {
-    let r;
-    try { r = await fetch(`${AEMET_API}${encodeURIComponent(radar)}/?api_key=${encodeURIComponent(key)}`); }
+    let r, via;
+    try { ({ r, via } = await aemetCall(radar, key)); }
     catch { throw new Error('el navegador no pudo conectar con AEMET (CORS o red)'); }
+    console.info('AEMET regional: clave enviada por', via);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     if (j.estado !== 200 || !j.datos) throw new Error(`AEMET respondió ${j.estado}: ${j.descripcion || 'sin detalle'} (radar "${radar}")`);
