@@ -312,19 +312,26 @@
     setStatus('Descargando radar de AEMET…');
     try {
       const r = await fetch(`${AEMET_WORKER}/radar/nacional`);
-      if (!r.ok) throw new Error(r.status);
+      if (!r.ok) {
+        let d = '';
+        try { const j = await r.json(); d = [j.error, j.descripcion, j.status || j.estado].filter(Boolean).join(' · '); } catch {}
+        throw new Error(`el Worker respondió HTTP ${r.status}${d ? ': ' + d : ''}`);
+      }
       const blob = await r.blob();
+      if (!blob.type.startsWith('image/')) throw new Error(`la respuesta no es una imagen (tipo: ${blob.type || 'desconocido'}, ${blob.size} bytes)`);
       if (aemetUrl) URL.revokeObjectURL(aemetUrl);
       aemetUrl = URL.createObjectURL(blob);
       if (aemetOverlay) map.removeLayer(aemetOverlay);
       aemetOverlay = L.imageOverlay(aemetUrl, AEMET_BOUNDS, { opacity: 0.75, zIndex: 10, interactive: false }).addTo(map);
+      aemetOverlay.on('error', () => setStatus(`El navegador no pudo leer la imagen de AEMET (tipo: ${blob.type}, ${blob.size} bytes).`));
       $('clock').textContent = fmt.format(new Date());
       setStatus('Composición nacional de AEMET: última imagen disponible, descargada a la hora indicada. Posición provisional, sin calibrar.');
     } catch (e) {
       console.warn('AEMET:', e);
       $('fuente').value = 'rv';
       showRainviewer();
-      setStatus('No se pudo obtener el radar de AEMET. Se vuelve a RainViewer.');
+      const msg = e instanceof TypeError ? 'no se pudo conectar con el Worker (red o CORS)' : e.message;
+      setStatus(`AEMET no disponible: ${msg}. Se vuelve a RainViewer.`);
     }
   }
 
