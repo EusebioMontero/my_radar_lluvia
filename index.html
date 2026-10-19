@@ -71,6 +71,10 @@
   .legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
   .legend i { display: inline-block; width: 22px; height: 8px; border-radius: 2px; }
   [hidden] { display: none !important; }
+  .cal { display: grid; gap: 4px; }
+  .cal label { display: grid; grid-template-columns: 8.5ch 1fr 7ch; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+  .cal output { font-variant-numeric: tabular-nums; color: var(--fg); text-align: right; }
+  .cal input[type="range"] { min-width: 0; accent-color: var(--accent); }
   input[type="password"] { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
   .leaflet-control-attribution { font-size: 10.5px; }
   @media (prefers-color-scheme: dark) { .base { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.7); } }
@@ -100,6 +104,7 @@
     </select>
     <button id="recalc" type="button" title="Recalcular la previsión para la zona que se ve">Previsión aquí</button>
     <button id="keybtn" type="button" hidden>Clave</button>
+    <button id="calbtn" type="button" hidden>Ajustar</button>
   </div>
 </div>
 
@@ -118,6 +123,13 @@
       <input id="aemetkey" type="password" autocomplete="off" placeholder="API key de AEMET (solo en este navegador)" style="flex:1;min-width:0" aria-label="API key de AEMET">
       <input id="radarcode" type="text" autocomplete="off" maxlength="6" size="4" aria-label="Código de radar" title="Código del radar regional (cc = Cáceres)" style="width:5ch;font:inherit;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:8px;padding:6px 8px">
       <button id="savekey" type="button">Guardar</button>
+    </div>
+    <div class="cal" id="calrow" hidden>
+      <label>Este–Oeste <input id="cal-dx" type="range" min="-60" max="60" step="1"><output id="o-dx"></output></label>
+      <label>Norte–Sur <input id="cal-dy" type="range" min="-60" max="60" step="1"><output id="o-dy"></output></label>
+      <label>Tamaño <input id="cal-s" type="range" min="60" max="140" step="1"><output id="o-s"></output></label>
+      <label>Opacidad <input id="cal-op" type="range" min="20" max="100" step="5"><output id="o-op"></output></label>
+      <div class="row" style="justify-content:space-between"><span id="calout" style="color:var(--muted);font-size:12px"></span><button id="calreset" type="button">Restablecer</button></div>
     </div>
     <div id="status" role="status">Cargando radar…</div>
   </div>
@@ -141,6 +153,7 @@
   const AEMET_API = 'https://opendata.aemet.es/opendata/api/red/radar/regional/';
   const AEMET_DEFAULT_RADAR = 'cc';              // Cáceres
   const AEMET_CENTER = [39.5, -6.4];             // PROVISIONAL: posición de la antena, hay que calibrarla
+  const AEMET_CREDIT = 'Radar © <a href="https://www.aemet.es">AEMET</a>';
   const AEMET_RADIUS_KM = 240;                   // PROVISIONAL: radio que cubre la imagen
 
   const $ = id => document.getElementById(id);
@@ -309,14 +322,35 @@
   };
   const getRadar = () => store.get('aemet_radar') || AEMET_DEFAULT_RADAR;
 
-  // Supuesto provisional: el disco de radar ocupa todo el ancho de la imagen y está centrado
-  // en AEMET_CENTER; el alto sobrante (cabecera y escala de colores) queda por debajo.
+  // Calibración ajustable (se guarda en este navegador): desplazamiento E-O y N-S en km, tamaño en % y opacidad en %.
+  const CAL_DEFAULT = { dx: 15, dy: 0, s: 100, op: 75 };
+  let cal = { ...CAL_DEFAULT };
+  try { Object.assign(cal, JSON.parse(localStorage.getItem('aemet_cal') || '{}')); } catch {}
+  let aemetNat = [1, 1];
+  const KM_DEG = 111.19;
+
+  function aemetCenter() {
+    const lat = AEMET_CENTER[0] + cal.dy / KM_DEG;
+    return [lat, AEMET_CENTER[1] + cal.dx / (KM_DEG * Math.cos(AEMET_CENTER[0] * Math.PI / 180))];
+  }
+  // Supuesto: el disco ocupa todo el ancho de la imagen; el alto sobrante (cabecera y escala) queda por debajo.
   function aemetBounds(w, h) {
-    const [lat, lon] = AEMET_CENTER;
-    const kmPerDeg = 111.19;
-    const dLon = AEMET_RADIUS_KM / (kmPerDeg * Math.cos(lat * Math.PI / 180));
-    const extraKm = Math.max(0, (h - w)) * (2 * AEMET_RADIUS_KM / w);
-    return [[lat - (AEMET_RADIUS_KM + extraKm) / kmPerDeg, lon - dLon], [lat + AEMET_RADIUS_KM / kmPerDeg, lon + dLon]];
+    const [lat, lon] = aemetCenter();
+    const R = AEMET_RADIUS_KM * cal.s / 100;
+    const dLon = R / (KM_DEG * Math.cos(lat * Math.PI / 180));
+    const extraKm = Math.max(0, h - w) * (2 * R / w);
+    return [[lat - (R + extraKm) / KM_DEG, lon - dLon], [lat + R / KM_DEG, lon + dLon]];
+  }
+  function applyCal(save = true) {
+    const R = AEMET_RADIUS_KM * cal.s / 100;
+    if (aemetOverlay) { aemetOverlay.setBounds(L.latLngBounds(aemetBounds(...aemetNat))); aemetOverlay.setOpacity(cal.op / 100); }
+    if (aemetRing) { aemetRing.setLatLng(aemetCenter()); aemetRing.setRadius(R * 1000); }
+    const sgn = v => (v > 0 ? '+' : '') + v;
+    $('o-dx').textContent = sgn(cal.dx) + ' km'; $('o-dy').textContent = sgn(cal.dy) + ' km';
+    $('o-s').textContent = cal.s + ' %'; $('o-op').textContent = cal.op + ' %';
+    $('calout').textContent = `E-O ${sgn(cal.dx)} · N-S ${sgn(cal.dy)} · tamaño ${cal.s} %`;
+    $('cal-dx').value = cal.dx; $('cal-dy').value = cal.dy; $('cal-s').value = cal.s; $('cal-op').value = cal.op;
+    if (save) { try { localStorage.setItem('aemet_cal', JSON.stringify(cal)); } catch {} }
   }
   function imageSize(url) {
     return new Promise((res, rej) => {
@@ -352,6 +386,7 @@
   }
 
   function clearAemet() {
+    map.attributionControl.removeAttribution(AEMET_CREDIT);
     if (aemetOverlay) { map.removeLayer(aemetOverlay); aemetOverlay = null; }
     if (aemetRing) { map.removeLayer(aemetRing); aemetRing = null; }
   }
@@ -359,7 +394,7 @@
   function showRainviewer() {
     clearAemet();
     $('play').hidden = $('slider').hidden = $('recalc').hidden = false;
-    $('keybtn').hidden = $('keyrow').hidden = true;
+    $('keybtn').hidden = $('keyrow').hidden = $('calbtn').hidden = $('calrow').hidden = true;
     if (layers.length) show(Math.min(idx, layers.length - 1));
     setStatus('RainViewer: pulsa ▶ para ver la animación.');
   }
@@ -368,7 +403,7 @@
     pause();
     layers.forEach(l => l.setOpacity(0));
     $('play').hidden = $('slider').hidden = $('recalc').hidden = true;
-    $('keybtn').hidden = false;
+    $('keybtn').hidden = false; $('calbtn').hidden = false;
     const b = $('badge'); b.textContent = 'AEMET'; b.classList.remove('fc');
     $('clock').textContent = '--:--';
     const key = store.get('aemet_key'), radar = getRadar();
@@ -386,13 +421,16 @@
       aemetUrl = URL.createObjectURL(blob);
       clearAemet();
       const [nw, nh] = await imageSize(aemetUrl);
+      aemetNat = [nw, nh];
       const bd = aemetBounds(nw, nh);
-      aemetOverlay = L.imageOverlay(aemetUrl, bd, { opacity: 0.75, zIndex: 10, interactive: false }).addTo(map);
+      aemetOverlay = L.imageOverlay(aemetUrl, bd, { opacity: cal.op / 100, zIndex: 10, interactive: false }).addTo(map);
       aemetOverlay.on('error', () => setStatus(`El navegador no pudo leer la imagen de AEMET (tipo: ${blob.type}, ${blob.size} bytes).`));
-      aemetRing = L.circle(AEMET_CENTER, { radius: AEMET_RADIUS_KM * 1000, color: '#e8341c', weight: 1.5, dashArray: '6 6', fill: false, interactive: false }).addTo(map);
+      aemetRing = L.circle(aemetCenter(), { radius: AEMET_RADIUS_KM * cal.s / 100 * 1000, color: '#e8341c', weight: 1.5, dashArray: '6 6', fill: false, interactive: false }).addTo(map);
       map.fitBounds(bd);
+      applyCal(false);
+      map.attributionControl.addAttribution(AEMET_CREDIT);
       $('clock').textContent = fmt.format(new Date());
-      setStatus(`Radar regional "${radar}" de AEMET (imagen de ${nw}×${nh} px, descargada a la hora indicada). Posición provisional: el círculo punteado marca el alcance supuesto.`);
+      setStatus(`Radar regional "${radar}" de AEMET (imagen de ${nw}×${nh} px, descargada a la hora indicada; una nueva cada 10 min). Usa Ajustar para alinear la frontera amarilla con la real.`);
     } catch (e) {
       console.warn('AEMET:', e);
       $('fuente').value = 'rv';
@@ -424,6 +462,11 @@
     $('slider').max = layers.length - 1;
   }
 
+  $('calbtn').addEventListener('click', () => { $('calrow').hidden = !$('calrow').hidden; applyCal(false); });
+  [['dx', 'cal-dx'], ['dy', 'cal-dy'], ['s', 'cal-s'], ['op', 'cal-op']].forEach(([k, id]) =>
+    $(id).addEventListener('input', e => { cal[k] = +e.target.value; applyCal(); }));
+  $('calreset').addEventListener('click', () => { cal = { ...CAL_DEFAULT }; applyCal(); });
+  applyCal(false);
   $('keybtn').addEventListener('click', () => { $('radarcode').value = getRadar(); $('keyrow').hidden = !$('keyrow').hidden; });
   $('savekey').addEventListener('click', () => {
     const v = $('aemetkey').value.trim(), rc = $('radarcode').value.trim().toLowerCase();
