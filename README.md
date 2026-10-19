@@ -4,4 +4,4 @@ Radar de lluvia con datos de [RainViewer](https://www.rainviewer.com): animació
 
 Es una página estática (`index.html`), sin dependencias que instalar. Ábrela en el navegador o publícala con GitHub Pages.
 
-Datos meteorológicos: Rain Viewer (uso personal/educativo, atribución obligatoria). Mapa base: OpenStreetMap y CARTO.
+Datos meteorológicos: Rain Viewer (uso personal/educativo, atribución obligatoria). Mapa base: OpenStreetMap.
