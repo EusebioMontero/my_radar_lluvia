@@ -70,6 +70,7 @@
   #status { color: var(--muted); font-size: 12.5px; min-height: 1.4em; }
   .legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
   .legend i { display: inline-block; width: 22px; height: 8px; border-radius: 2px; }
+  [hidden] { display: none !important; }
   .leaflet-control-attribution { font-size: 10.5px; }
   @media (prefers-color-scheme: dark) { .base { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.7); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -81,6 +82,11 @@
 <div class="top">
   <div class="card">
     <h1>Radar de lluvia</h1>
+    <label for="fuente" style="position:absolute;left:-9999px">Fuente</label>
+    <select id="fuente">
+      <option value="rv" selected>RainViewer</option>
+      <option value="aemet">AEMET</option>
+    </select>
     <label class="sr" for="zona" style="position:absolute;left:-9999px">Zona</label>
     <select id="zona">
       <option value="38.9161,-6.3437" selected>Mérida</option>
@@ -123,6 +129,11 @@
   const FORECAST_STEPS = 3;                   // 3 pasos de 10 min = +30 min
   const STEP_S = 600;
   const FRAME_MS = 650;
+
+  // AEMET: URL del Worker (ver worker/README.md). Vacío = opción desactivada.
+  const AEMET_WORKER = '';
+  // Esquinas [[sur, oeste], [norte, este]] de la composición nacional. PROVISIONAL: hay que calibrarlas con la imagen real.
+  const AEMET_BOUNDS = [[34.5, -11.5], [44.8, 5.5]];
 
   const $ = id => document.getElementById(id);
   const map = L.map('map', { zoomControl: false, maxZoom: 10, minZoom: 4 });
@@ -282,6 +293,41 @@
     }
   }
 
+  // ---- Fuente AEMET ----
+  let aemetOverlay = null, aemetUrl = null;
+
+  function showRainviewer() {
+    if (aemetOverlay) { map.removeLayer(aemetOverlay); aemetOverlay = null; }
+    $('play').hidden = $('slider').hidden = $('recalc').hidden = false;
+    if (layers.length) show(Math.min(idx, layers.length - 1));
+    setStatus('RainViewer: pulsa ▶ para ver la animación.');
+  }
+
+  async function showAemet() {
+    pause();
+    layers.forEach(l => l.setOpacity(0));
+    $('play').hidden = $('slider').hidden = $('recalc').hidden = true;
+    const b = $('badge'); b.textContent = 'AEMET'; b.classList.remove('fc');
+    $('clock').textContent = '--:--';
+    setStatus('Descargando radar de AEMET…');
+    try {
+      const r = await fetch(`${AEMET_WORKER}/radar/nacional`);
+      if (!r.ok) throw new Error(r.status);
+      const blob = await r.blob();
+      if (aemetUrl) URL.revokeObjectURL(aemetUrl);
+      aemetUrl = URL.createObjectURL(blob);
+      if (aemetOverlay) map.removeLayer(aemetOverlay);
+      aemetOverlay = L.imageOverlay(aemetUrl, AEMET_BOUNDS, { opacity: 0.75, zIndex: 10, interactive: false }).addTo(map);
+      $('clock').textContent = fmt.format(new Date());
+      setStatus('Composición nacional de AEMET: última imagen disponible, descargada a la hora indicada. Posición provisional, sin calibrar.');
+    } catch (e) {
+      console.warn('AEMET:', e);
+      $('fuente').value = 'rv';
+      showRainviewer();
+      setStatus('No se pudo obtener el radar de AEMET. Se vuelve a RainViewer.');
+    }
+  }
+
   // ---- Arranque ----
   async function init() {
     try {
@@ -304,12 +350,17 @@
     $('slider').max = layers.length - 1;
   }
 
+  if (!AEMET_WORKER) {
+    const o = $('fuente').querySelector('option[value="aemet"]');
+    o.disabled = true; o.textContent = 'AEMET (sin configurar)';
+  }
+  $('fuente').addEventListener('change', e => (e.target.value === 'aemet' ? showAemet() : showRainviewer()));
   $('play').addEventListener('click', play);
   $('slider').addEventListener('input', e => { pause(); show(+e.target.value); });
   $('zona').addEventListener('change', e => {
     const p = e.target.value.split(',').map(Number);
     map.setView(p, 7); marker.setLatLng(p);
-    if (past.length) map.once('moveend', () => { pause(); buildForecast().then(() => show(layers.length - 1)); });
+    if (past.length && $('fuente').value === 'rv') map.once('moveend', () => { pause(); buildForecast().then(() => show(layers.length - 1)); });
   });
   $('recalc').addEventListener('click', () => { pause(); buildForecast().then(() => show(layers.length - 1)); });
 

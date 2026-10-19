@@ -1,0 +1,10 @@
+name = "radar-aemet-proxy"
+main = "index.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+# Orígenes que pueden llamar al Worker (separados por comas).
+ALLOWED_ORIGINS = "https://eusebiomontero.github.io,http://localhost:8000"
+
+# La API key NO va aquí. Se guarda como secreto:
+#   npx wrangler secret put AEMET_KEY
