@@ -116,7 +116,7 @@
     </div>
     <div class="row" id="keyrow" hidden>
       <input id="aemetkey" type="password" autocomplete="off" placeholder="API key de AEMET (solo en este navegador)" style="flex:1;min-width:0" aria-label="API key de AEMET">
-      <input id="radarcode" type="text" autocomplete="off" maxlength="6" size="4" aria-label="Código de radar" title="Código del radar regional (ca = Cáceres)" style="width:5ch;font:inherit;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:8px;padding:6px 8px">
+      <input id="radarcode" type="text" autocomplete="off" maxlength="6" size="4" aria-label="Código de radar" title="Código del radar regional (cc = Cáceres)" style="width:5ch;font:inherit;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:8px;padding:6px 8px">
       <button id="savekey" type="button">Guardar</button>
     </div>
     <div id="status" role="status">Cargando radar…</div>
@@ -139,7 +139,7 @@
 
   // AEMET: radar regional, pedido directamente desde el navegador con tu clave (se guarda solo en localStorage).
   const AEMET_API = 'https://opendata.aemet.es/opendata/api/red/radar/regional/';
-  const AEMET_DEFAULT_RADAR = 'ca';              // Cáceres
+  const AEMET_DEFAULT_RADAR = 'cc';              // Cáceres
   const AEMET_CENTER = [39.5, -6.4];             // PROVISIONAL: posición de la antena, hay que calibrarla
   const AEMET_RADIUS_KM = 240;                   // PROVISIONAL: radio que cubre la imagen
 
@@ -318,7 +318,7 @@
 
   async function aemetFetch(key, radar) {
     let r;
-    try { r = await fetch(`${AEMET_API}${encodeURIComponent(radar)}?api_key=${encodeURIComponent(key)}`); }
+    try { r = await fetch(`${AEMET_API}${encodeURIComponent(radar)}/?api_key=${encodeURIComponent(key)}`); }
     catch { throw new Error('el navegador no pudo conectar con AEMET (CORS o red)'); }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
