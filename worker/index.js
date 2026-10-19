@@ -5,6 +5,7 @@
 const API = 'https://opendata.aemet.es/opendata/api';
 const ROUTES = { '/radar/nacional': '/red/radar/nacional' };
 const CACHE_SECONDS = 300;
+const VERSION = 'v3';
 const UA = 'Mozilla/5.0 (compatible; my_radar_lluvia-proxy/1.0; +https://github.com/EusebioMontero/my_radar_lluvia)';
 
 function corsHeaders(request, env) {
@@ -49,12 +50,13 @@ export default {
           headers: { api_key: env.AEMET_KEY.trim(), Accept: 'application/json', 'User-Agent': UA, 'Cache-Control': 'no-cache' }
         });
         if (!meta.ok) { lastErr = { error: 'AEMET respondió con error', status: meta.status }; continue; }
+        const raw = await meta.text();
         let j;
-        try { j = await meta.json(); } catch { lastErr = { error: 'Respuesta de AEMET no válida' }; continue; }
-        if (j.estado !== 200 || !j.datos) { lastErr = { error: 'AEMET no devolvió datos', estado: j.estado, descripcion: j.descripcion }; if (j.estado === 401) break; continue; }
+        try { j = JSON.parse(raw); } catch { lastErr = { error: 'Respuesta de AEMET no válida', http: meta.status, tipo: meta.headers.get('content-type'), inicio: raw.slice(0, 200) }; continue; }
+        if (j.estado !== 200 || !j.datos) { lastErr = { error: 'AEMET no devolvió datos', estado: j.estado, descripcion: j.descripcion, http: meta.status, ruta: route }; if (j.estado === 401) break; continue; }
         info = j; break;
       }
-      if (!info) return json(502, { ...lastErr, intentos: 3 }, cors);
+      if (!info) return json(502, { ...lastErr, intentos: 3, worker: VERSION }, cors);
       const img = await fetch(info.datos, { headers: { 'User-Agent': UA } });
       if (!img.ok) return json(502, { error: 'No se pudo descargar la imagen de AEMET', status: img.status }, cors);
 
