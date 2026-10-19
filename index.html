@@ -309,11 +309,22 @@
   };
   const getRadar = () => store.get('aemet_radar') || AEMET_DEFAULT_RADAR;
 
-  function aemetBounds() {
+  // Supuesto provisional: el disco de radar ocupa todo el ancho de la imagen y está centrado
+  // en AEMET_CENTER; el alto sobrante (cabecera y escala de colores) queda por debajo.
+  function aemetBounds(w, h) {
     const [lat, lon] = AEMET_CENTER;
-    const dLat = AEMET_RADIUS_KM / 111.19;
-    const dLon = AEMET_RADIUS_KM / (111.19 * Math.cos(lat * Math.PI / 180));
-    return [[lat - dLat, lon - dLon], [lat + dLat, lon + dLon]];
+    const kmPerDeg = 111.19;
+    const dLon = AEMET_RADIUS_KM / (kmPerDeg * Math.cos(lat * Math.PI / 180));
+    const extraKm = Math.max(0, (h - w)) * (2 * AEMET_RADIUS_KM / w);
+    return [[lat - (AEMET_RADIUS_KM + extraKm) / kmPerDeg, lon - dLon], [lat + AEMET_RADIUS_KM / kmPerDeg, lon + dLon]];
+  }
+  function imageSize(url) {
+    return new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res([im.naturalWidth, im.naturalHeight]);
+      im.onerror = () => rej(new Error('el navegador no pudo leer la imagen de AEMET'));
+      im.src = url;
+    });
   }
 
   async function aemetFetch(key, radar) {
@@ -374,13 +385,14 @@
       if (aemetUrl) URL.revokeObjectURL(aemetUrl);
       aemetUrl = URL.createObjectURL(blob);
       clearAemet();
-      const bd = aemetBounds();
+      const [nw, nh] = await imageSize(aemetUrl);
+      const bd = aemetBounds(nw, nh);
       aemetOverlay = L.imageOverlay(aemetUrl, bd, { opacity: 0.75, zIndex: 10, interactive: false }).addTo(map);
       aemetOverlay.on('error', () => setStatus(`El navegador no pudo leer la imagen de AEMET (tipo: ${blob.type}, ${blob.size} bytes).`));
       aemetRing = L.circle(AEMET_CENTER, { radius: AEMET_RADIUS_KM * 1000, color: '#e8341c', weight: 1.5, dashArray: '6 6', fill: false, interactive: false }).addTo(map);
       map.fitBounds(bd);
       $('clock').textContent = fmt.format(new Date());
-      setStatus(`Radar regional "${radar}" de AEMET (última imagen, descargada a la hora indicada). Posición provisional: el círculo punteado marca el alcance supuesto.`);
+      setStatus(`Radar regional "${radar}" de AEMET (imagen de ${nw}×${nh} px, descargada a la hora indicada). Posición provisional: el círculo punteado marca el alcance supuesto.`);
     } catch (e) {
       console.warn('AEMET:', e);
       $('fuente').value = 'rv';
