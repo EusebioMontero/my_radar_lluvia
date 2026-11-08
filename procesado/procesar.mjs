@@ -17,6 +17,7 @@ import { fromArrayBuffer } from 'geotiff';
 const URL_PPI = process.env.URL_PPI || 'https://www.aemet.es/es/api-eltiempo/radar/download/PPI';
 const UA = 'my_radar_lluvia (GitHub Actions; https://github.com/EusebioMontero/my_radar_lluvia)';
 const GUARDAR = 12;        // imágenes que se conservan por radar (2 h a una cada 10 min)
+const MAX_EDAD_MIN = 130;  // las imágenes más de ~2 h anteriores a la última de su radar se descartan
 const ACTIVO_MIN = 60;     // un radar está activo si su última imagen es de hace menos de 60 min respecto a la más reciente
 const MARGEN = 4;          // píxeles de margen alrededor del círculo
 const RADIO_KM = 240;
@@ -220,7 +221,11 @@ for (const codigo of Object.keys(porRadar).sort()) {
     console.log(`  ${codigo} ${f.t}: ${(bytes.length / 1024).toFixed(0)} KB, ${ecos} px con eco, ${ruido} descartados`);
   }
   imagenes.sort((a, b) => a.t.localeCompare(b.t));
-  for (const viejo of imagenes.splice(0, Math.max(0, imagenes.length - GUARDAR))) rmSync(join(salida, viejo.f), { force: true });
+  // fuera las que sobran y las que quedan muy atrás respecto a la más reciente (huecos tras una caída de AEMET)
+  const corte = aMin(imagenes.at(-1).t) - MAX_EDAD_MIN;
+  const sobran = imagenes.filter((im, k) => k < imagenes.length - GUARDAR || aMin(im.t) < corte);
+  for (const viejo of sobran) rmSync(join(salida, viejo.f), { force: true });
+  imagenes.splice(0, imagenes.length, ...imagenes.filter(im => !sobran.includes(im)));
   if (escala && !manifest.escala) manifest.escala = escala;
   manifest.radares[codigo] = { nombre: NOMBRES[codigo] || null, lat: geo.lat, lon: geo.lon, oeste: geo.oeste, norte: geo.norte, ancho: geo.w, alto: geo.h,
     ventana: { x0: geo.x0, y0: geo.y0, cx: geo.cx, cy: geo.cy, rx: geo.rx, ry: geo.ry }, imagenes };
