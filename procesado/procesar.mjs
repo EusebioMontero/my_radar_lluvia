@@ -14,7 +14,7 @@ import { gunzipSync, deflateSync } from 'node:zlib';
 import { join } from 'node:path';
 import { fromArrayBuffer } from 'geotiff';
 
-const URL_PPI = 'https://www.aemet.es/es/api-eltiempo/radar/download/PPI';
+const URL_PPI = process.env.URL_PPI || 'https://www.aemet.es/es/api-eltiempo/radar/download/PPI';
 const UA = 'my_radar_lluvia (GitHub Actions; https://github.com/EusebioMontero/my_radar_lluvia)';
 const GUARDAR = 12;        // imágenes que se conservan por radar (2 h a una cada 10 min)
 const ACTIVO_MIN = 60;     // un radar está activo si su última imagen es de hace menos de 60 min respecto a la más reciente
@@ -23,12 +23,14 @@ const RADIO_KM = 240;
 const REDUCCION = 10;      // la localización del círculo se hace sobre la imagen reducida 1/10
 
 // ---------- descarga y tar ----------
-async function descargar() {
+async function descargar(url = URL_PPI) {
   let ultimo;
   for (let i = 1; i <= 4; i++) {
     try {
-      const r = await fetch(URL_PPI, { headers: { 'User-Agent': UA, Accept: '*/*' } });
+      const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: '*/*' } });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const cab = ['date', 'last-modified', 'age', 'cache-control', 'etag', 'x-cache', 'server'].map(h => [h, r.headers.get(h)]).filter(x => x[1]).map(x => `${x[0]}=${x[1]}`).join('; ');
+      console.log(`Descarga ${url.replace(URL_PPI, 'PPI')}: HTTP ${r.status}; ${cab || '(sin cabeceras de caché)'}`);
       return Buffer.from(await r.arrayBuffer());
     } catch (e) { ultimo = e; console.warn(`Intento ${i} fallido: ${e.message}`); await new Promise(r => setTimeout(r, 4000 * i)); }
   }
@@ -148,9 +150,31 @@ const NOMBRES = {   // solo los verificados por distancia con la app de referenc
 const [salida, archivoLocal] = process.argv.slice(2);
 if (!salida) { console.error('Uso: node procesar.mjs <carpeta_salida> [archivo.tar.gz]'); process.exit(2); }
 
+const abrirArchivo = b => untar(b.subarray(0, 2).equals(Buffer.from([0x1f, 0x8b])) ? gunzipSync(b) : b);
+// minutos desde la imagen PPI más reciente del archivo (las horas de los nombres son UTC)
+const edadMin = ents => {
+  const t = ents.map(e => /down_[A-Z]{3}(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d{2}\.PPI\./.exec(e.name)).filter(Boolean)
+    .map(m => Date.UTC(2000 + +m[1], +m[2] - 1, +m[3], +m[4], +m[5]) / 60000);
+  return t.length ? Date.now() / 60000 - Math.max(...t) : Infinity;
+};
+
 const t0 = Date.now();
-const buf = archivoLocal ? readFileSync(archivoLocal) : await descargar();
-const entradas = untar(buf.subarray(0, 2) .equals(Buffer.from([0x1f, 0x8b])) ? gunzipSync(buf) : buf);
+let buf, entradas;
+if (archivoLocal) { buf = readFileSync(archivoLocal); entradas = abrirArchivo(buf); }
+else {
+  buf = await descargar();
+  entradas = abrirArchivo(buf);
+  const edad = edadMin(entradas);
+  console.log(`Imagen más reciente del archivo: hace ${Math.round(edad)} min`);
+  // Si el archivo parece atrasado (caché intermedia), se pide otra vez con un parámetro distinto y se usa el más nuevo.
+  if (edad > 25) {
+    try {
+      const buf2 = await descargar(`${URL_PPI}?_=${Date.now()}`), ent2 = abrirArchivo(buf2), edad2 = edadMin(ent2);
+      console.log(`Segunda descarga: imagen más reciente hace ${Math.round(edad2)} min`);
+      if (edad2 < edad) { buf = buf2; entradas = ent2; }
+    } catch (e) { console.warn(`Segunda descarga fallida: ${e.message}`); }
+  }
+}
 console.log(`Archivo: ${(buf.length / 1e6).toFixed(1)} MB, ${entradas.length} ficheros`);
 
 // agrupar los PPI por radar

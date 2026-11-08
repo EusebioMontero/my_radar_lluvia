@@ -822,8 +822,9 @@
   function radStatus() {
     const used = Object.entries(rad.radars).filter(([, R]) => R.frames.size).map(([c]) => c);
     if (!rad.timeline.length) { setStatus('Ningún radar de AEMET con datos recientes cubre esta parte del mapa.'); return; }
-    const gen = rad.manifest.generado ? hace(Date.parse(rad.manifest.generado) / 1000) : '';
-    setStatus(`Radares de AEMET (≈500 m): ${used.join(', ')}. Imágenes de ${fmt.format(new Date(rad.timeline[0] * 1000))} a ${fmt.format(new Date(rad.timeline.at(-1) * 1000))}${gen ? `; datos procesados ${gen}` : ''}.`);
+    const last = rad.timeline.at(-1), viejo = Date.now() / 1000 - last > 30 * 60;
+    setStatus(`Radares de AEMET (≈500 m): ${used.join(', ')}. Imágenes de ${fmt.format(new Date(rad.timeline[0] * 1000))} a ${fmt.format(new Date(last * 1000))} (última ${hace(last)})` +
+      (viejo ? '. Ojo: AEMET lleva un rato sin publicar imágenes nuevas.' : '.'));
   }
 
   // Recarga lo que falta y reconstruye la línea de tiempo manteniendo, si se puede, el instante que se estaba viendo.
