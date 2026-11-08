@@ -68,6 +68,9 @@
     border-radius: 6px; border: 1px solid var(--accent); color: var(--accent); white-space: nowrap;
   }
   #badge.fc { border-color: var(--forecast); color: var(--forecast); }
+  /* Marco del mapa mientras se muestra un instante previsto */
+  #map.fc::after { content: ''; position: absolute; inset: 0; z-index: 700; pointer-events: none;
+    border: 5px solid var(--forecast); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25), inset 0 0 24px rgba(181, 80, 11, 0.35); }
   #status { color: var(--muted); font-size: 12.5px; min-height: 1.4em; }
   .aemet-legend { display: flex; align-items: flex-start; gap: 0; font-size: 10.5px; color: var(--muted); }
   .aemet-legend b { font-weight: 500; padding-right: 6px; padding-top: 0; }
@@ -287,7 +290,7 @@
 
   const rad = {
     manifest: null, loadedAt: 0, origin: null, dx: 0.005, nclases: ESCALA.length,
-    radars: {}, timeline: [], fc: null, lut: null, pal32: null,
+    radars: {}, timeline: [], fc: null, pv: null, lut: null, pal32: null,
     // Un tile por radar con su imagen más reciente (≤ MAX_EDAD_S) no posterior a T.
     tilesAt(T) {
       const out = [];
@@ -324,6 +327,22 @@
     rad.lut = new Map(esc.map(([, c], k) => [(c[0] << 16) | (c[1] << 8) | c[2], k + 1]));
     rad.pal32 = new Uint32Array(256);
     esc.forEach(([, c], k) => { rad.pal32[k + 1] = (255 << 24 | c[2] << 16 | c[1] << 8 | c[0]) >>> 0; });
+  }
+
+  // Previsión de pySTEPS que publica el workflow (rejilla de ≈1 km para toda la península): se descarga una vez por cálculo.
+  async function radLoadPrev() {
+    const p = rad.manifest.prevision;
+    if (!p || !p.imagenes || !p.imagenes.length) { rad.pv = null; return; }
+    if (rad.pv && rad.pv.base === p.base) return;
+    try {
+      const frames = await Promise.all(p.imagenes.map(async i => {
+        const r = await fetch(DATA_URL + i.f);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return { T: rtime(i.t), cls: await radDecode(await r.blob()) };
+      }));
+      rad.pv = { base: p.base, metodo: p.metodo, frames,
+                 geo: { w: p.ancho, h: p.alto, west: p.oeste, north: p.norte, dx: p.pixel_grados, dy: p.pixel_grados } };
+    } catch (e) { console.warn('previsión pySTEPS:', e); rad.pv = null; }
   }
 
   // Radares cuyo círculo de 240 km llega a lo que se ve (con margen, para la previsión); como mucho MAX_RADARES, los más cercanos al centro.
@@ -463,8 +482,20 @@
   }
 
   // ---- Línea de tiempo: imágenes observadas + instantes de previsión ----
-  const total = () => rad.timeline.length + (rad.fc ? rad.fc.steps : 0);
-  const timeAt = i => (i < rad.timeline.length ? rad.timeline[i] : rad.timeline.at(-1) + STEP_S * (i - rad.timeline.length + 1));
+  // Instantes previstos: los de pySTEPS posteriores a la última imagen; si no hay, el cálculo sencillo del navegador.
+  const pvFrames = () => (rad.pv && rad.timeline.length ? rad.pv.frames.filter(f => f.T > rad.timeline.at(-1)) : []);
+  const fcCount = () => { const n = pvFrames().length; return n || (rad.fc ? rad.fc.steps : 0); };
+  const total = () => rad.timeline.length + fcCount();
+  const timeAt = i => {
+    const obs = rad.timeline.length;
+    if (i < obs) return rad.timeline[i];
+    const pv = pvFrames();
+    return pv.length ? pv[i - obs].T : rad.timeline.at(-1) + STEP_S * (i - obs + 1);
+  };
+  const fcTilesAt = k => {                                   // k = 1, 2, … pasos después de la última imagen
+    const pv = pvFrames();
+    return pv.length ? [{ cls: pv[k - 1].cls, pal32: rad.pal32, geo: rad.pv.geo }] : rad.fcTiles(k);
+  };
   let idx = 0, timer = null, follow = true;   // follow: mientras no se toque la línea de tiempo se muestra el instante más cercano a «ahora»
   const nowIdx = () => {
     const now = Date.now() / 1000, n = total();
@@ -476,7 +507,8 @@
   function show(i) {
     const obs = rad.timeline.length, fc = i >= obs;
     idx = i;
-    radarLayer.show(fc ? rad.fcTiles(i - obs + 1) : rad.tilesAt(rad.timeline[i]));
+    radarLayer.show(fc ? fcTilesAt(i - obs + 1) : rad.tilesAt(rad.timeline[i]));
+    map.getContainer().classList.toggle('fc', fc);
     $('slider').value = i;
     $('clock').textContent = fmt.format(new Date(timeAt(i) * 1000));
     $('badge').textContent = fc ? 'previsión' : 'AEMET';
@@ -502,7 +534,12 @@
     const last = rad.timeline.at(-1), edad = Date.now() / 1000 - last;
     let t = `Radares de AEMET (≈500 m): ${used.join(', ')}. Última imagen a las ${fmt.format(new Date(last * 1000))} (${hace(last)}).`;
     if (edad > 60 * 60) t += ' Ojo: AEMET lleva un rato sin publicar imágenes nuevas.';
-    if (rad.fc) {
+    const pv = pvFrames();
+    if (pv.length) {
+      t += ` Previsión hasta las ${fmt.format(new Date(pv.at(-1).T * 1000))} con pySTEPS (movimiento por zonas; los detalles pequeños se suavizan con el tiempo)` +
+        (rad.fc ? `: en esta zona la lluvia va hacia el ${compass(rad.fc.heading)} a unos ${Math.round(rad.fc.kmh)} km/h.` : '.');
+      if (edad > 12 * 60) t += ' AEMET publica con retraso, así que lo más reciente que se ve ya es una estimación.';
+    } else if (rad.fc) {
       t += ` Previsión experimental: la lluvia se mueve hacia el ${compass(rad.fc.heading)} a unos ${Math.round(rad.fc.kmh)} km/h.`;
       if (edad > 12 * 60) t += ' AEMET publica con retraso, así que lo más reciente que se ve ya es una estimación.';
     } else if (motivo) t += ` Sin previsión: ${motivo}.`;
@@ -513,7 +550,7 @@
   async function radRefresh(fresh) {
     if (fresh) await radManifest();
     const before = rad.timeline.length, was = idx, T = rad.timeline[idx];
-    await radLoad();
+    await Promise.all([radLoad(), fresh ? radLoadPrev() : null]);
     rad.buildTimeline();
     const motivo = radForecast(), obs = rad.timeline.length, n = total();
     $('slider').max = Math.max(0, n - 1);

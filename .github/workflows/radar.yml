@@ -1,7 +1,7 @@
 name: Datos de radar AEMET
 
-# Descarga el archivo de radares de AEMET (~30 MB), lo reduce a PNG pequeños (carpeta procesado/) y lo publica en la
-# rama "datos", que lee la página. GitHub puede retrasar las ejecuciones programadas unos minutos.
+# Descarga el archivo de radares de AEMET (~30 MB), lo reduce a PNG pequeños (carpeta procesado/), calcula la previsión
+# a 2 h con pySTEPS y lo publica todo en la rama "datos", que lee la página. GitHub puede retrasar las ejecuciones programadas unos minutos.
 on:
   schedule:
     - cron: '*/10 * * * *'
@@ -27,9 +27,17 @@ jobs:
           cache: npm
           cache-dependency-path: procesado/package-lock.json
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: procesado/requirements.txt
+
       - name: Instalar dependencias
         working-directory: procesado
-        run: npm ci
+        run: |
+          npm ci
+          pip install -q -r requirements.txt
 
       # Se parte de lo publicado la vez anterior para procesar solo las imágenes nuevas y conservar las últimas 2 h.
       - name: Traer los datos anteriores
@@ -43,6 +51,12 @@ jobs:
         id: proc
         continue-on-error: true
         run: node procesado/procesar.mjs ../datos
+
+      # Previsión (pySTEPS). Si falla, se publica igual: el manifest queda sin "prevision" y la página usa su cálculo sencillo.
+      - name: Calcular la previsión
+        if: steps.proc.outcome == 'success'
+        continue-on-error: true
+        run: python procesado/prever.py ../datos
 
       - name: Publicar en la rama datos
         if: steps.proc.outcome == 'success'
