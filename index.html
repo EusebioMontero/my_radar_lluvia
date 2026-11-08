@@ -48,7 +48,7 @@
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
     padding: 10px 12px; backdrop-filter: blur(6px);
   }
-  .top .card { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
+  .top .card { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; max-width: 100%; }
   .top h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: 0.01em; }
   select, button {
     font: inherit; color: var(--fg); background: transparent;
@@ -70,6 +70,21 @@
   #status { color: var(--muted); font-size: 12.5px; min-height: 1.4em; }
   .legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
   .legend i { display: inline-block; width: 22px; height: 8px; border-radius: 2px; }
+  .aemet-legend { display: flex; align-items: flex-start; gap: 0; font-size: 10.5px; color: var(--muted); }
+  .aemet-legend b { font-weight: 500; padding-right: 6px; padding-top: 0; }
+  .aemet-legend div { flex: 1; min-width: 0; }
+  .aemet-legend i { display: block; height: 8px; }
+  .aemet-legend span { display: block; padding-top: 1px; font-variant-numeric: tabular-nums; }
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--fg); width: min(420px, 92vw); padding: 16px 18px; }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+  dialog h2 { margin: 0 0 4px; font-size: 17px; }
+  dialog p { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; }
+  dialog ul { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 10px; }
+  dialog li { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+  dialog li:last-child { border-bottom: 0; padding-bottom: 0; }
+  dialog li strong { font-weight: 650; }
+  dialog li span { color: var(--muted); font-size: 12.5px; }
+  dialog form { text-align: right; }
   [hidden] { display: none !important; }
   .cal { display: grid; gap: 4px; }
   .cal label { display: grid; grid-template-columns: 8.5ch 1fr 7ch; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
@@ -77,6 +92,8 @@
   .cal input[type="range"] { min-width: 0; accent-color: var(--accent); }
   input[type="password"] { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
   .leaflet-control-attribution { font-size: 10.5px; }
+  /* En pantallas estrechas el panel inferior taparía la atribución: se sube por encima (JS rellena --panel-h). */
+  @media (max-width: 700px) { .leaflet-bottom { bottom: var(--panel-h, 0px); } }
   @media (prefers-color-scheme: dark) { .base { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.7); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -90,7 +107,8 @@
     <label for="fuente" style="position:absolute;left:-9999px">Fuente</label>
     <select id="fuente">
       <option value="rv" selected>RainViewer</option>
-      <option value="compo">AEMET nacional</option>
+      <option value="rad">AEMET radares (500 m)</option>
+      <option value="compo">AEMET nacional (3 km)</option>
       <option value="aemet">AEMET regional (Cáceres)</option>
     </select>
     <label class="sr" for="zona" style="position:absolute;left:-9999px">Zona</label>
@@ -106,6 +124,7 @@
     <button id="recalc" type="button" title="Recalcular la previsión para la zona que se ve">Previsión aquí</button>
     <button id="keybtn" type="button" hidden>Clave</button>
     <button id="calbtn" type="button" hidden>Ajustar</button>
+    <button id="cobbtn" type="button" hidden title="Radares que cubren la zona">Cobertura</button>
   </div>
 </div>
 
@@ -120,6 +139,7 @@
       <span id="badge">cargando</span>
       <span class="legend" id="legend"><i style="background:linear-gradient(90deg,#8ad1ff,#2f7ed8,#f5d000,#e8341c,#b10fb0)"></i>débil → intensa</span>
     </div>
+    <div class="aemet-legend" id="legendAemet" hidden role="img" aria-label="Escala de intensidad de lluvia en mm/h"></div>
     <div class="row" id="keyrow" hidden>
       <input id="aemetkey" type="password" autocomplete="off" placeholder="API key de AEMET (solo en este navegador)" style="flex:1;min-width:0" aria-label="API key de AEMET">
       <input id="radarcode" type="text" autocomplete="off" maxlength="6" size="4" aria-label="Código de radar" title="Código del radar regional (cc = Cáceres)" style="width:5ch;font:inherit;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:8px;padding:6px 8px">
@@ -135,6 +155,13 @@
     <div id="status" role="status">Cargando radar…</div>
   </div>
 </div>
+
+<dialog id="cob" aria-labelledby="cob-t">
+  <h2 id="cob-t">Cobertura</h2>
+  <p id="cob-zona"></p>
+  <ul id="cob-lista"></ul>
+  <form method="dialog"><button>Aceptar</button></form>
+</dialog>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -160,6 +187,17 @@
   // AEMET nacional: archivo con 24 GeoTIFF (10 min). Se pide directo y, si el navegador lo bloquea, por el Worker.
   const COMPO_DIRECT = 'https://www.aemet.es/es/api-eltiempo/radar/download/compo';
   const COMPO_WORKER = 'https://radar-aemet-proxy.eusebio-montero.workers.dev/radar/compo';
+
+  // AEMET radares: PNG ya reducidos (≈500 m por píxel) que publica el workflow de GitHub Actions en la rama "datos".
+  const DATA_URL = 'https://raw.githubusercontent.com/EusebioMontero/my_radar_lluvia/datos/';
+  const RADIO_KM = 240;                          // alcance de cada radar regional
+  const MAX_RADARES = 8;                         // máximo de radares en memoria a la vez
+  const PAGE_FRAMES = 12;                        // imágenes por radar (2 h)
+  const MAX_EDAD_S = 15 * 60;                    // un radar sin imagen nueva en 15 min no se pinta en ese instante
+  const CREDIT_DERIVADA = 'Información elaborada utilizando, entre otras, la obtenida de la <a href="https://www.aemet.es">Agencia Estatal de Meteorología</a>';
+  // Escala de reflectividad de AEMET (dBZ) y color de cada tramo; la leyenda en mm/h sale de la relación Z = 200·R^1,6.
+  const ESCALA = [[12, [0, 0, 252]], [18, [0, 148, 252]], [24, [0, 252, 252]], [30, [67, 131, 35]], [36, [0, 192, 0]], [42, [0, 255, 0]],
+                  [48, [255, 255, 0]], [54, [255, 187, 0]], [60, [255, 127, 0]], [66, [255, 0, 0]], [72, [200, 0, 90]]];
 
   const $ = id => document.getElementById(id);
   const map = L.map('map', { zoomControl: false, maxZoom: 10, minZoom: 4 });
@@ -192,12 +230,23 @@
     });
   }
 
-  let mode = 'rv';                    // 'rv' | 'compo' | 'aemet'
-  // Conjunto de imágenes activo (RainViewer o AEMET nacional): n imágenes, sus horas y cómo mostrar la i-ésima.
-  const cur = () => (mode === 'compo'
-    ? { n: compo.frames.length, times: compo.times, fc: [], label: 'AEMET', apply: i => compo.show(i) }
+  let mode = 'rv';                    // 'rv' | 'rad' | 'compo' | 'aemet'
+  let radTimer = null;                // refresco periódico de la fuente AEMET radares
+  // Conjunto de imágenes activo (RainViewer, AEMET radares o AEMET nacional): n imágenes, sus horas y cómo mostrar la i-ésima.
+  const cur = () => (mode === 'rad'
+    ? { n: rad.timeline.length, times: rad.timeline, fc: [], label: 'AEMET', apply: i => radarLayer.show(rad.tilesAt(rad.timeline[i])) }
+    : mode === 'compo'
+    ? { n: compo.frames.length, times: compo.times, fc: [], label: 'AEMET', apply: i => radarLayer.show([compo.tile(i)]) }
     : { n: layers.length, times, fc: isForecast, label: 'observado',
         apply: i => layers.forEach((l, k) => l.setOpacity(k === i ? 0.75 : 0)) });
+
+  // Qué se ve en la barra según la fuente: leyenda, botón Cobertura y refresco periódico.
+  function chrome(m) {
+    $('legend').hidden = m !== 'rv';
+    $('legendAemet').hidden = !(m === 'compo' || m === 'rad');
+    $('cobbtn').hidden = m !== 'rad';
+    if (m !== 'rad') { clearInterval(radTimer); radTimer = null; }
+  }
 
   function show(i) {
     const S = cur();
@@ -437,16 +486,17 @@
 
   function clearAemet() {
     map.attributionControl.removeAttribution(AEMET_CREDIT);
+    map.attributionControl.removeAttribution(CREDIT_DERIVADA);
     if (aemetOverlay) { map.removeLayer(aemetOverlay); aemetOverlay = null; }
     if (aemetRing) { map.removeLayer(aemetRing); aemetRing = null; }
   }
 
   function showRainviewer() {
     mode = 'rv';
+    chrome('rv');
     clearAemet();
-    compo.hide();
+    radarLayer.hide();
     $('play').hidden = $('slider').hidden = $('recalc').hidden = false;
-    $('legend').hidden = false;
     $('keybtn').hidden = $('keyrow').hidden = $('calbtn').hidden = $('calrow').hidden = true;
     $('slider').max = Math.max(0, layers.length - 1);
     if (layers.length) show(Math.min(idx, layers.length - 1));
@@ -456,9 +506,9 @@
   async function showAemet() {
     pause();
     mode = 'aemet';
+    chrome('aemet');
     layers.forEach(l => l.setOpacity(0));
-    compo.hide();
-    $('legend').hidden = true;
+    radarLayer.hide();
     $('play').hidden = $('slider').hidden = $('recalc').hidden = true;
     $('keybtn').hidden = false; $('calbtn').hidden = false;
     const b = $('badge'); b.textContent = 'AEMET'; b.classList.remove('fc');
@@ -571,22 +621,12 @@
   }
   // </parse>
 
-  // Capa propia: en vez de estirar una imagen de ~3 km por píxel, dibuja un canvas a la resolución de la pantalla.
-  // Para cada punto de la pantalla mira los 4 píxeles de radar vecinos y pinta la clase con más peso
-  // (interpolación suavizada), así los contornos salen redondeados a cualquier zoom y no hay bloques.
-  const compo = {
-    frames: [], times: [], geo: null, loadedAt: 0, layer: null,
-    clear() { this.hide(); this.frames = []; this.times = []; this.geo = null; },
-    show(i) {
-      if (!this.layer) this.layer = new CompoLayer();
-      if (!map.hasLayer(this.layer)) this.layer.addTo(map);
-      this.layer.setFrame(i);
-    },
-    hide() { if (this.layer && map.hasLayer(this.layer)) map.removeLayer(this.layer); }
-  };
-
-  const CompoLayer = L.Layer.extend({
-    initialize() { this._i = -1; },
+  // Capa de radar propia: en vez de estirar una imagen, dibuja un canvas a la resolución de la pantalla.
+  // Para cada punto mira los 4 píxeles de radar vecinos y pinta la clase con más peso (pesos suavizados), así los
+  // contornos salen redondeados a cualquier zoom. Con varios radares, en cada punto gana la clase más alta.
+  // Un "tile" es { cls, pal32, geo: { w, h, west, north, dx, dy } }: clase por píxel, su paleta y su rejilla en grados.
+  const RadarLayer = L.Layer.extend({
+    initialize() { this._tiles = []; },
     onAdd(m) {
       const c = this._c = L.DomUtil.create('canvas');
       c.style.pointerEvents = 'none'; c.style.opacity = '0.8';
@@ -600,13 +640,13 @@
       m.off('zoomstart', this._hide, this);
       L.DomUtil.remove(this._c); this._c = this._img = null;
     },
-    setFrame(i) { this._i = i; this._draw(); },
+    setTiles(t) { this._tiles = t; this._draw(); },
     _hide() { if (this._c) this._c.style.visibility = 'hidden'; },
-    // Coloca el canvas (algo más grande que la pantalla para poder arrastrar) y calcula, para cada columna y
-    // cada fila, a qué posición del radar corresponde (el eje X solo depende de la longitud y el Y de la latitud).
+    // Coloca el canvas (algo más grande que la pantalla para poder arrastrar) y calcula la longitud de cada columna y
+    // la latitud de cada fila (el eje X solo depende de la longitud y el Y de la latitud).
     _reset() {
-      const m = this._map, c = this._c, g = compo.geo;
-      if (!c || !g) return;
+      const m = this._map, c = this._c;
+      if (!c) return;
       const sz = m.getSize(), pad = 0.35;
       const w = Math.round(sz.x * (1 + 2 * pad)), h = Math.round(sz.y * (1 + 2 * pad));
       const ss = (window.devicePixelRatio || 1) >= 2 ? 2 : 1.5;   // sobremuestreo: el navegador lo reduce y suaviza el borde
@@ -614,59 +654,239 @@
       L.DomUtil.setPosition(c, tl);
       c.style.width = w + 'px'; c.style.height = h + 'px';
       const W = c.width = Math.round(w * ss), H = c.height = Math.round(h * ss);
-      const dx = (g.east - g.west) / g.w, dy = (g.north - g.south) / g.h;
+      this._lon = new Float64Array(W); this._lat = new Float64Array(H);
+      for (let x = 0; x < W; x++) this._lon[x] = m.layerPointToLatLng([tl.x + (x + 0.5) / ss, tl.y]).lng;
+      for (let y = 0; y < H; y++) this._lat[y] = m.layerPointToLatLng([tl.x, tl.y + (y + 0.5) / ss]).lat;
       this._xi = new Int32Array(W); this._xf = new Float32Array(W);
       this._yi = new Int32Array(H); this._yf = new Float32Array(H);
-      for (let x = 0; x < W; x++) {
-        const col = (m.layerPointToLatLng([tl.x + (x + 0.5) / ss, tl.y]).lng - g.west) / dx - 0.5;
-        const i = Math.floor(col); this._xi[x] = i; this._xf[x] = col - i;
-      }
-      for (let y = 0; y < H; y++) {
-        const row = (g.north - m.layerPointToLatLng([tl.x, tl.y + (y + 0.5) / ss]).lat) / dy - 0.5;
-        const j = Math.floor(row); this._yi[y] = j; this._yf[y] = row - j;
-      }
+      this._best = new Uint8Array(W * H);
       this._img = c.getContext('2d').createImageData(W, H);
       this._draw();
       c.style.visibility = '';
     },
     _draw() {
-      const c = this._c, F = compo.frames[this._i], g = compo.geo;
-      if (!c || !g || !this._img) return;
-      const img = this._img, W = img.width, H = img.height, out = new Uint32Array(img.data.buffer);
-      const xi = this._xi, xf = this._xf, yi = this._yi, yf = this._yf;
+      const c = this._c;
+      if (!c || !this._img) return;
+      const img = this._img, out = new Uint32Array(img.data.buffer), best = this._best;
+      best.fill(0);
+      for (const t of this._tiles) this._paint(t);
       out.fill(0);
-      if (F) {
-        const cls = F.cls, pal = F.pal32, w = g.w, h = g.h;
-        for (let y = 0; y < H; y++) {
-          const j = yi[y];
-          if (j < -1 || j >= h) continue;
-          const fy = yf[y], sy = fy * fy * (3 - 2 * fy);
-          const r0 = j >= 0 ? j * w : -1, r1 = j + 1 < h ? (j + 1) * w : -1, row = y * W;
-          for (let x = 0; x < W; x++) {
-            const i = xi[x];
-            if (i < -1 || i >= w) continue;
-            const a = r0 >= 0 && i >= 0 ? cls[r0 + i] : 0, b = r0 >= 0 && i + 1 < w ? cls[r0 + i + 1] : 0;
-            const e = r1 >= 0 && i >= 0 ? cls[r1 + i] : 0, d = r1 >= 0 && i + 1 < w ? cls[r1 + i + 1] : 0;
-            let k;
-            if (a === b && b === e && e === d) k = a;
-            else {
-              const fx = xf[x], sx = fx * fx * (3 - 2 * fx);
-              const wa = (1 - sx) * (1 - sy), wb = sx * (1 - sy), wc = (1 - sx) * sy, wd = sx * sy;
-              k = a; let s = wa + (b === a ? wb : 0) + (e === a ? wc : 0) + (d === a ? wd : 0);
-              const sb = wb + (a === b ? wa : 0) + (e === b ? wc : 0) + (d === b ? wd : 0);
-              if (sb > s) { s = sb; k = b; }
-              const se = wc + (a === e ? wa : 0) + (b === e ? wb : 0) + (d === e ? wd : 0);
-              if (se > s) { s = se; k = e; }
-              const sd = wd + (a === d ? wa : 0) + (b === d ? wb : 0) + (e === d ? wc : 0);
-              if (sd > s) k = d;
-            }
-            if (k) out[row + x] = pal[k];
+      const pal = this._tiles[0] && this._tiles[0].pal32;      // los tiles de un mismo instante comparten paleta
+      if (pal) for (let i = 0; i < best.length; i++) if (best[i]) out[i] = pal[best[i]];
+      c.getContext('2d').putImageData(img, 0, 0);
+    },
+    _paint(t) {
+      const g = t.geo, cls = t.cls, w = g.w, h = g.h, W = this._img.width, H = this._img.height;
+      const xi = this._xi, xf = this._xf, yi = this._yi, yf = this._yf, best = this._best;
+      let xa = W, xb = -1, ya = H, yb = -1;
+      for (let x = 0; x < W; x++) {
+        const col = (this._lon[x] - g.west) / g.dx - 0.5, i = Math.floor(col);
+        xi[x] = i; xf[x] = col - i;
+        if (i >= -1 && i < w) { if (x < xa) xa = x; xb = x; }
+      }
+      for (let y = 0; y < H; y++) {
+        const row = (g.north - this._lat[y]) / g.dy - 0.5, j = Math.floor(row);
+        yi[y] = j; yf[y] = row - j;
+        if (j >= -1 && j < h) { if (y < ya) ya = y; yb = y; }
+      }
+      for (let y = ya; y <= yb; y++) {
+        const j = yi[y], fy = yf[y], sy = fy * fy * (3 - 2 * fy);
+        const r0 = j >= 0 ? j * w : -1, r1 = j + 1 < h ? (j + 1) * w : -1, row = y * W;
+        for (let x = xa; x <= xb; x++) {
+          const i = xi[x];
+          const a = r0 >= 0 && i >= 0 ? cls[r0 + i] : 0, b = r0 >= 0 && i + 1 < w ? cls[r0 + i + 1] : 0;
+          const e = r1 >= 0 && i >= 0 ? cls[r1 + i] : 0, d = r1 >= 0 && i + 1 < w ? cls[r1 + i + 1] : 0;
+          let k;
+          if (a === b && b === e && e === d) k = a;
+          else {
+            const fx = xf[x], sx = fx * fx * (3 - 2 * fx);
+            const wa = (1 - sx) * (1 - sy), wb = sx * (1 - sy), wc = (1 - sx) * sy, wd = sx * sy;
+            k = a; let s = wa + (b === a ? wb : 0) + (e === a ? wc : 0) + (d === a ? wd : 0);
+            const sb = wb + (a === b ? wa : 0) + (e === b ? wc : 0) + (d === b ? wd : 0);
+            if (sb > s) { s = sb; k = b; }
+            const se = wc + (a === e ? wa : 0) + (b === e ? wb : 0) + (d === e ? wd : 0);
+            if (se > s) { s = se; k = e; }
+            const sd = wd + (a === d ? wa : 0) + (b === d ? wb : 0) + (e === d ? wc : 0);
+            if (sd > s) k = d;
           }
+          if (k > best[row + x]) best[row + x] = k;
         }
       }
-      this._c.getContext('2d').putImageData(img, 0, 0);
     }
   });
+
+  const radarLayer = {
+    layer: null,
+    show(tiles) {
+      if (!this.layer) this.layer = new RadarLayer();
+      if (!map.hasLayer(this.layer)) this.layer.addTo(map);
+      this.layer.setTiles(tiles);
+    },
+    hide() { if (this.layer && map.hasLayer(this.layer)) map.removeLayer(this.layer); }
+  };
+
+  // Composición nacional: una rejilla por imagen (la paleta de cada TIFF es propia, por eso va con su tile).
+  const compo = {
+    frames: [], times: [], geo: null, loadedAt: 0,
+    clear() { radarLayer.hide(); this.frames = []; this.times = []; this.geo = null; },
+    tile(i) { return { cls: this.frames[i].cls, pal32: this.frames[i].pal32, geo: this.geo }; }
+  };
+
+  // Leyenda en mm/h: AEMET calcula la lluvia a partir de la reflectividad con Z = 200·R^1,6 (Marshall-Palmer).
+  const mmh = dbz => 10 ** ((dbz - 10 * Math.log10(200)) / 16);
+  const fmtMmh = r => (r < 10 ? r.toFixed(1) : String(Math.round(r)));
+  $('legendAemet').innerHTML = '<b>mm/h</b>' + ESCALA.map(([dbz, c]) =>
+    `<div title="${dbz} dBZ"><i style="background:rgb(${c})"></i><span>${fmtMmh(mmh(dbz))}</span></div>`).join('');
+
+  // ---- Fuente AEMET radares (≈500 m): PNG con una clase por píxel, ya procesados en la rama "datos" ----
+  const rtime = t => Date.UTC(+t.slice(0, 4), +t.slice(4, 6) - 1, +t.slice(6, 8), +t.slice(8, 10), +t.slice(10, 12)) / 1000;
+  const km = (la1, lo1, la2, lo2) => {
+    const r = x => x * Math.PI / 180, h = Math.sin(r(la2 - la1) / 2) ** 2 + Math.cos(r(la1)) * Math.cos(r(la2)) * Math.sin(r(lo2 - lo1) / 2) ** 2;
+    return 12742 * Math.asin(Math.sqrt(h));
+  };
+  const hace = s => { const m = Math.max(0, Math.round((Date.now() / 1000 - s) / 60)); return m < 120 ? `hace ${m} min` : `hace ${Math.round(m / 60)} h`; };
+
+  const rad = {
+    manifest: null, loadedAt: 0, radars: {}, timeline: [], lut: null, pal32: null,
+    tilesAt(T) {
+      const out = [];
+      for (const R of Object.values(this.radars)) {
+        let best = null;
+        for (const [t, cls] of R.frames) { const s = rtime(t); if (s <= T && T - s <= MAX_EDAD_S && (!best || s > best.s)) best = { s, cls }; }
+        if (best) out.push({ cls: best.cls, pal32: this.pal32, geo: R.geo });
+      }
+      return out;
+    },
+    buildTimeline() {
+      const set = new Set();
+      for (const R of Object.values(this.radars)) for (const t of R.frames.keys()) set.add(rtime(t));
+      this.timeline = [...set].sort((a, b) => a - b).slice(-PAGE_FRAMES);
+    }
+  };
+
+  async function radManifest() {
+    const r = await fetch(DATA_URL + 'manifest.json', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status === 404 ? 'todavía no hay datos publicados (ejecuta el workflow «Datos de radar AEMET» en la pestaña Actions del repositorio)' : `HTTP ${r.status}`);
+    const man = await r.json();
+    if (!man.radares || !Object.keys(man.radares).length) throw new Error('el manifiesto no trae ningún radar');
+    rad.manifest = man; rad.loadedAt = Date.now();
+    const esc = man.escala && man.escala.length ? man.escala.map(e => [e.min, e.rgb]) : ESCALA;
+    rad.lut = new Map(esc.map(([, c], k) => [(c[0] << 16) | (c[1] << 8) | c[2], k + 1]));
+    rad.pal32 = new Uint32Array(256);
+    esc.forEach(([, c], k) => { rad.pal32[k + 1] = (255 << 24 | c[2] << 16 | c[1] << 8 | c[0]) >>> 0; });
+  }
+
+  // Radares cuyo círculo de 240 km llega a lo que se ve en pantalla (como mucho MAX_RADARES, los más cercanos al centro).
+  function radNeeded() {
+    const b = map.getBounds(), c = map.getCenter(), out = [];
+    for (const [code, r] of Object.entries(rad.manifest.radares)) {
+      const la = Math.min(Math.max(r.lat, b.getSouth()), b.getNorth()), lo = Math.min(Math.max(r.lon, b.getWest()), b.getEast());
+      if (km(r.lat, r.lon, la, lo) <= RADIO_KM) out.push([km(r.lat, r.lon, c.lat, c.lng), code]);
+    }
+    return out.sort((x, y) => x[0] - y[0]).slice(0, MAX_RADARES).map(x => x[1]);
+  }
+
+  async function radDecode(blob) {
+    const bmp = await createImageBitmap(blob);
+    const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(bmp, 0, 0);
+    if (bmp.close) bmp.close();
+    const d = g.getImageData(0, 0, c.width, c.height).data, cls = new Uint8Array(c.width * c.height), lut = rad.lut;
+    for (let i = 0, o = 0; i < cls.length; i++, o += 4) if (d[o + 3] > 127) cls[i] = lut.get((d[o] << 16) | (d[o + 1] << 8) | d[o + 2]) || 0;
+    return cls;
+  }
+
+  async function radLoad() {
+    const man = rad.manifest;
+    await Promise.all(radNeeded().map(async code => {
+      const info = man.radares[code];
+      const R = rad.radars[code] || (rad.radars[code] = { frames: new Map() });
+      R.info = info;
+      R.geo = { w: info.ancho, h: info.alto, west: info.oeste, north: info.norte, dx: man.pixel_grados, dy: man.pixel_grados };
+      const want = info.imagenes.slice(-PAGE_FRAMES);
+      for (const t of [...R.frames.keys()]) if (!want.some(i => i.t === t)) R.frames.delete(t);
+      await Promise.all(want.filter(i => !R.frames.has(i.t)).map(async i => {
+        try {
+          const r = await fetch(DATA_URL + i.f);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          R.frames.set(i.t, await radDecode(await r.blob()));
+        } catch (e) { console.warn('radar', code, i.t, e); }
+      }));
+    }));
+    // si el usuario se alejó mucho, se sueltan los radares que ya no se ven para no gastar memoria
+    const keep = new Set(radNeeded());
+    for (const code of Object.keys(rad.radars)) if (!keep.has(code)) delete rad.radars[code];
+  }
+
+  function radStatus() {
+    const used = Object.entries(rad.radars).filter(([, R]) => R.frames.size).map(([c]) => c);
+    if (!rad.timeline.length) { setStatus('Ningún radar de AEMET con datos recientes cubre esta parte del mapa.'); return; }
+    const gen = rad.manifest.generado ? hace(Date.parse(rad.manifest.generado) / 1000) : '';
+    setStatus(`Radares de AEMET (≈500 m): ${used.join(', ')}. Imágenes de ${fmt.format(new Date(rad.timeline[0] * 1000))} a ${fmt.format(new Date(rad.timeline.at(-1) * 1000))}${gen ? `; datos procesados ${gen}` : ''}.`);
+  }
+
+  // Recarga lo que falta y reconstruye la línea de tiempo manteniendo, si se puede, el instante que se estaba viendo.
+  async function radRefresh(fresh) {
+    if (fresh) await radManifest();
+    if (mode !== 'rad') return;
+    const eraUltimo = !rad.timeline.length || idx >= rad.timeline.length - 1, T = rad.timeline[idx];
+    await radLoad();
+    if (mode !== 'rad') return;
+    rad.buildTimeline();
+    $('slider').max = Math.max(0, rad.timeline.length - 1);
+    if (rad.timeline.length) {
+      let k = rad.timeline.length - 1;
+      if (!eraUltimo && T) k = rad.timeline.reduce((best, t, i) => (Math.abs(t - T) < Math.abs(rad.timeline[best] - T) ? i : best), 0);
+      show(k);
+    } else { radarLayer.hide(); $('clock').textContent = '--:--'; }
+    radStatus();
+  }
+
+  async function showRad() {
+    pause();
+    mode = 'rad';
+    chrome('rad');
+    clearAemet();
+    layers.forEach(l => l.setOpacity(0));
+    radarLayer.hide();
+    $('play').hidden = $('slider').hidden = false;
+    $('recalc').hidden = $('keybtn').hidden = $('keyrow').hidden = $('calbtn').hidden = $('calrow').hidden = true;
+    $('clock').textContent = '--:--';
+    setStatus('Descargando radares de AEMET…');
+    try {
+      await radRefresh(true);
+      if (mode !== 'rad') return;
+      map.attributionControl.addAttribution(CREDIT_DERIVADA);
+      clearInterval(radTimer);
+      radTimer = setInterval(() => radRefresh(true).catch(e => console.warn('AEMET radares:', e)), 5 * 60e3);
+    } catch (e) {
+      console.warn('AEMET radares:', e);
+      $('fuente').value = 'rv';
+      showRainviewer();
+      setStatus(`AEMET radares no disponible: ${e.message}. Se vuelve a RainViewer.`);
+    }
+  }
+
+  // Panel "Cobertura": radares a menos de 240 km de la zona elegida, su distancia y la antigüedad de su última imagen.
+  function showCobertura() {
+    const man = rad.manifest, p = marker.getLatLng(), lista = $('cob-lista');
+    lista.textContent = '';
+    $('cob-zona').textContent = `Desde ${$('zona').selectedOptions[0].textContent}`;
+    const filas = man ? Object.entries(man.radares)
+      .map(([code, r]) => ({ code, r, d: km(p.lat, p.lng, r.lat, r.lon), s: rtime(r.imagenes.at(-1).t) }))
+      .filter(x => x.d <= RADIO_KM).sort((a, b) => a.d - b.d) : [];
+    for (const x of filas) {
+      const li = document.createElement('li');
+      const n = document.createElement('strong'); n.textContent = x.r.nombre || `Radar ${x.code}`;
+      const h = document.createElement('span'); h.textContent = hace(x.s);
+      const d = document.createElement('span'); d.textContent = `AEMET · a ≈${Math.round(x.d)} km`;
+      li.append(n, h, d);
+      lista.append(li);
+    }
+    if (!filas.length) { const li = document.createElement('li'); li.textContent = 'Ningún radar activo a menos de 240 km.'; lista.append(li); }
+    $('cob').showModal();
+  }
 
   async function fetchCompo() {
     const errs = [];
@@ -695,7 +915,7 @@
       setStatus(`Preparando imágenes de AEMET… ${i + 1}/${files.length}`);
       await new Promise(r => setTimeout(r));   // deja respirar a la página
       const g = parseTiff(files[i].data);
-      if (!compo.geo) compo.geo = { w: g.w, h: g.h, west: g.west, north: g.north, east: g.east, south: g.south };
+      if (!compo.geo) compo.geo = { w: g.w, h: g.h, west: g.west, north: g.north, dx: (g.east - g.west) / g.w, dy: (g.north - g.south) / g.h };
       else if (g.w !== compo.geo.w || g.h !== compo.geo.h) throw new Error('las imágenes de AEMET no tienen el mismo tamaño');
       const m = /radw(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(files[i].name);
       compo.times.push(m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5]) / 1000 : Date.now() / 1000 - (files.length - 1 - i) * 600);
@@ -707,11 +927,12 @@
   async function showCompo() {
     pause();
     mode = 'compo';
+    chrome('compo');
     clearAemet();
     layers.forEach(l => l.setOpacity(0));
+    radarLayer.hide();
     $('play').hidden = $('slider').hidden = false;
     $('recalc').hidden = $('keybtn').hidden = $('keyrow').hidden = $('calbtn').hidden = $('calrow').hidden = true;
-    $('legend').hidden = true;
     try {
       if (!compo.frames.length || Date.now() - compo.loadedAt > 10 * 60e3) {
         $('clock').textContent = '--:--';
@@ -721,7 +942,7 @@
       if (mode !== 'compo') return;   // el usuario cambió de fuente mientras se descargaba
       $('slider').max = compo.frames.length - 1;
       show(compo.frames.length - 1);
-      map.attributionControl.addAttribution(AEMET_CREDIT);
+      map.attributionControl.addAttribution(CREDIT_DERIVADA);
       setStatus(`Composición nacional de AEMET: ${compo.frames.length} imágenes, una cada 10 min. Pulsa ▶ para animarlas.`);
     } catch (e) {
       console.warn('AEMET nacional:', e);
@@ -768,7 +989,21 @@
     $('aemetkey').value = ''; $('keyrow').hidden = true;
     $('fuente').value = 'aemet'; showAemet();
   });
-  $('fuente').addEventListener('change', e => ({ aemet: showAemet, compo: showCompo }[e.target.value] || showRainviewer)());
+  $('fuente').addEventListener('change', e => ({ aemet: showAemet, compo: showCompo, rad: showRad }[e.target.value] || showRainviewer)());
+  $('cobbtn').addEventListener('click', showCobertura);
+  {
+    const panel = document.querySelector('.bottom .card');
+    const lift = () => document.documentElement.style.setProperty('--panel-h', Math.max(0, innerHeight - panel.getBoundingClientRect().top) + 'px');
+    if (window.ResizeObserver) new ResizeObserver(lift).observe(panel);
+    addEventListener('resize', lift);
+    lift();
+  }
+  let radDebounce = null;
+  map.on('moveend', () => {
+    if (mode !== 'rad' || !rad.manifest) return;
+    clearTimeout(radDebounce);
+    radDebounce = setTimeout(() => radRefresh(false).catch(e => console.warn('AEMET radares:', e)), 500);
+  });
   $('play').addEventListener('click', play);
   $('slider').addEventListener('input', e => { pause(); show(+e.target.value); });
   $('zona').addEventListener('change', e => {

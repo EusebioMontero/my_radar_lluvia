@@ -1,0 +1,10 @@
+{
+  "name": "procesado-radar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Convierte los GeoTIFF de radar de AEMET en PNG pequeños para my_radar_lluvia",
+  "dependencies": {
+    "geotiff": "2.1.3"
+  }
+}

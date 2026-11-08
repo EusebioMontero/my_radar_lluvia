@@ -1,0 +1,56 @@
+name: Datos de radar AEMET
+
+# Descarga el archivo de radares de AEMET (~30 MB), lo reduce a PNG pequeños (carpeta procesado/) y lo publica en la
+# rama "datos", que lee la página. GitHub puede retrasar las ejecuciones programadas unos minutos.
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: radar-datos
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  procesar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: procesado/package-lock.json
+
+      - name: Instalar dependencias
+        working-directory: procesado
+        run: npm ci
+
+      # Se parte de lo publicado la vez anterior para procesar solo las imágenes nuevas y conservar las últimas 2 h.
+      - name: Traer los datos anteriores
+        run: |
+          git clone --depth=1 --branch datos "https://github.com/${GITHUB_REPOSITORY}.git" ../datos || mkdir -p ../datos
+          rm -rf ../datos/.git
+
+      # Si AEMET no responde, este paso falla pero el trabajo no se marca como error (y no se publica nada):
+      # la rama "datos" conserva lo último bueno y la página muestra la hora de esas imágenes.
+      - name: Procesar el archivo de AEMET
+        id: proc
+        continue-on-error: true
+        run: node procesado/procesar.mjs ../datos
+
+      - name: Publicar en la rama datos
+        if: steps.proc.outcome == 'success'
+        working-directory: ../datos
+        run: |
+          git init -q -b datos
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Datos de radar $(date -u '+%Y-%m-%d %H:%M') UTC"
+          git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" datos
