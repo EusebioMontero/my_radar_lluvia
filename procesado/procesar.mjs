@@ -167,14 +167,6 @@ else {
   entradas = abrirArchivo(buf);
   const edad = edadMin(entradas);
   console.log(`Imagen más reciente del archivo: hace ${Math.round(edad)} min`);
-  // Si el archivo parece atrasado (caché intermedia), se pide otra vez con un parámetro distinto y se usa el más nuevo.
-  if (edad > 25) {
-    try {
-      const buf2 = await descargar(`${URL_PPI}?_=${Date.now()}`), ent2 = abrirArchivo(buf2), edad2 = edadMin(ent2);
-      console.log(`Segunda descarga: imagen más reciente hace ${Math.round(edad2)} min`);
-      if (edad2 < edad) { buf = buf2; entradas = ent2; }
-    } catch (e) { console.warn(`Segunda descarga fallida: ${e.message}`); }
-  }
 }
 console.log(`Archivo: ${(buf.length / 1e6).toFixed(1)} MB, ${entradas.length} ficheros`);
 
